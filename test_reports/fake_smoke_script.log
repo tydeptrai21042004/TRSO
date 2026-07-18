@@ -1,0 +1,40 @@
+Not using distributed mode
+Namespace(backbone='resnet18', weights='none', list_backbones=False, pretrained=False, keep_pretrained_head=True, cifar_hub='auto', clip_model=None, clip_pretrained='openai', freeze_backbone=True, tuning_method='trso', sidetune_alpha=0.5, sidetune_learn_alpha=True, sidetune_width=64, sidetune_depth=3, prompt_size=10, kernel_size=3, adapt_size=8, adapt_scale=1.0, trso_kernel_size=5, trso_spatial_rank=2, trso_channel_ratio=16, trso_operator_radius=1.0, trso_gate_init=0.01, trso_basis_init_scale=0.05, trso_basis_trainable=False, trso_calibration=True, trso_calibration_batches=2, trso_calibration_scale=1.0, trso_head_warmup_steps=0, trso_keep_ratio=1.0, trso_max_adapters=2, trso_parameter_budget=0, trso_config='', trso_save_config='', bam_reduction=16, bam_dilation=4, bam_gate_init=0.0, bam_use_bn=True, bam_insert='stage', bam_stages='1,2,3,4', ra_mode='parallel', ra_reduction=16, ra_norm='bn', ra_act='relu', ra_gate_init=0.0, ra_stages='1,2,3,4', ssf_init_scale=1.0, ssf_init_shift=0.0, lora_r=8, lora_alpha=16.0, lora_target='all', bitfit_train_head=True, batch_size=4, epochs=1, update_freq=1, fs_shot=16, model='resnet50_clip', drop_path=0, input_size=64, crop_ratio=0.875, model_ema=False, model_ema_decay=0.9999, model_ema_force_cpu=False, model_ema_eval=False, opt_eps=1e-08, clip_grad=None, weight_decay=0.0001, weight_decay_adapter=0.0, lr=0.0003, min_lr=1e-06, warmup_epochs=0, warmup_steps=-1, weight_decay_end=None, color_jitter=0.0, aa='rand-m9-mstd0.5-inc1', smoothing=0.0, train_interpolation='bicubic', crop_pct=None, reprob=0.0, remode='pixel', recount=1, resplit=False, imagenet_norm=True, train_aug='standard', mixup=0.0, cutmix=0.0, cutmix_minmax=None, mixup_prob=1.0, mixup_switch_prob=0.5, mixup_mode='batch', finetune='', head_from='', head_init_scale=1.0, model_key='model|module', model_prefix='', is_tuning=False, dataset='fake', data_path='./data', eval_data_path=None, nb_classes=4, fake_train_size=16, fake_val_size=8, fake_test_size=8, imagenet_default_mean_and_std=True, output_dir='test_reports/fake_smoke', log_dir=None, device='cpu', seed=0, resume='', auto_resume=False, save_ckpt=False, save_ckpt_freq=1, save_ckpt_num=2, start_epoch=0, eval=False, dist_eval=True, disable_eval=False, final_test=False, num_workers=0, pin_mem=False, world_size=1, local_rank=-1, dist_on_itp=False, dist_url='env://', use_amp=False, profile_efficiency=False, profile_batch_size=32, save_history=True, measure_eval_latency=False, enable_wandb=False, project='parameter_efficient_tuning_cv', wandb_ckpt=False, opt='adamw', data='data', distributed=False)
+[Info] Using device: cpu  (AMP=off)
+[Info] Backbone=resnet18 | tv_weights=none -> None | hub.pretrained=False
+[Info] Loaded resnet18 from torchvision.
+[TRSO] Calibration batches=2; candidates=8; selected=2
+[TRSO] * layer2.0.pet_adapter: response_score=1.560947e-01
+[TRSO] * layer3.0.pet_adapter: response_score=1.361095e-01
+[TRSO]   layer3.1.pet_adapter: response_score=1.123343e-01
+[TRSO]   layer2.1.pet_adapter: response_score=1.100571e-01
+[TRSO]   layer1.0.pet_adapter: response_score=3.701036e-02
+[TRSO]   layer1.1.pet_adapter: response_score=3.338332e-02
+[TRSO]   layer4.1.pet_adapter: response_score=1.390382e-02
+[TRSO]   layer4.0.pet_adapter: response_score=1.201173e-02
+[TRSO] Saved calibration config to test_reports/fake_smoke/trso_calibration.json
+memory_cost_MB: 11.303
+param_size_MB: 11.303
+act_size_MB: 0.000
+Number of trainable params: 12,298
+Number of total params: 11,265,828
+LR = 0.00030000
+Batch size = 4
+Number of training examples = 16
+Number of training steps per epoch = 4
+[ParamGroups] adapter_like=10,246 others=2,052
+Set warmup steps = 0
+Set warmup steps = 0
+criterion = CrossEntropyLoss()
+Start training for 1 epochs
+Epoch: [0]  [0/4]  eta: 0:00:00  lr: 0.000300  min_lr: 0.000300  loss: 1.4615 (1.4615)  class_acc: 0.2500 (0.2500)  weight_decay: 0.0001 (0.0001)  time: 0.0465  data: 0.0049
+Epoch: [0]  [3/4]  eta: 0:00:00  lr: 0.000045  min_lr: 0.000045  loss: 1.3559 (1.3918)  class_acc: 0.2500 (0.3750)  weight_decay: 0.0001 (0.0001)  time: 0.0407  data: 0.0046
+Epoch: [0] Total time: 0:00:00 (0.0408 s / it)
+Averaged stats: lr: 0.000045  min_lr: 0.000045  loss: 1.3559 (1.3918)  class_acc: 0.2500 (0.3750)  weight_decay: 0.0001 (0.0001)  epoch_time: 0.1634 (0.1634)
+Test:  [0/2]  eta: 0:00:00  loss: 1.5070 (1.5070)  acc1: 25.0000 (25.0000)  time: 0.0282  data: 0.0046
+Test:  [1/2]  eta: 0:00:00  loss: 1.5070 (1.5080)  acc1: 0.0000 (12.5000)  time: 0.0267  data: 0.0041
+Test: Total time: 0:00:00 (0.0270 s / it)
+* Acc@1 12.500 loss 1.508
+Validation accuracy on 8 images: 12.500%
+Best validation accuracy: 12.500% at epoch 0
+Training time 0:00:00

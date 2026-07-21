@@ -96,9 +96,9 @@ def get_args_parser():
     parser.add_argument("--adapt_scale", default=1.0, type=float)
 
     # Task-Response Spatial Operator (TRSO)
-    parser.add_argument("--trso_kernel_size", type=int, default=5)
-    parser.add_argument("--trso_spatial_rank", type=int, default=2)
-    parser.add_argument("--trso_channel_ratio", type=int, default=16)
+    parser.add_argument("--trso_kernel_size", type=int, default=5, help="Odd support of each depthwise spatial atom.")
+    parser.add_argument("--trso_spatial_rank", type=int, default=2, help="Maximum rank of the flattened C x k^2 channel-kernel bank.")
+    parser.add_argument("--trso_channel_ratio", type=int, default=16, help="Legacy compatibility argument; Scientific TRSO has no channel bottleneck.")
     parser.add_argument("--trso_operator_radius", type=float, default=1.0)
     parser.add_argument("--trso_gate_init", type=float, default=1e-2)
     parser.add_argument("--trso_basis_init_scale", type=float, default=5e-2)
@@ -109,7 +109,7 @@ def get_args_parser():
     parser.add_argument("--trso_head_warmup_steps", type=int, default=0)
     parser.add_argument("--trso_keep_ratio", type=float, default=1.0)
     parser.add_argument("--trso_max_adapters", type=int, default=0, help="0 keeps all candidates allowed by keep_ratio.")
-    parser.add_argument("--trso_parameter_budget", type=int, default=0, help="Optional adapter-only trainable-parameter budget; 0 disables this constraint.")
+    parser.add_argument("--trso_parameter_budget", type=int, default=0, help="Exact global budget for active TRSO coefficients/gates; 0 disables the budget.")
     parser.add_argument("--trso_config", type=str, default="", help="Load a previously calibrated TRSO JSON config.")
     parser.add_argument("--trso_save_config", type=str, default="", help="Optional explicit output path for the calibrated TRSO JSON config.")
 
@@ -274,6 +274,10 @@ def canonicalize_args(args):
     ):
         args.freeze_backbone = True
 
+    if args.trso_kernel_size <= 0 or args.trso_kernel_size % 2 == 0:
+        raise ValueError("--trso_kernel_size must be a positive odd integer.")
+    if args.trso_spatial_rank <= 0 or args.trso_spatial_rank > args.trso_kernel_size ** 2:
+        raise ValueError("--trso_spatial_rank must be in [1, trso_kernel_size^2].")
     if args.trso_calibration_batches < 1:
         raise ValueError("--trso_calibration_batches must be at least 1.")
     if not (0 < args.trso_keep_ratio <= 1.0):
@@ -829,6 +833,14 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
     if used_batches == 0:
         raise RuntimeError("TRSO calibration received no batches.")
 
+    # Calibration occurs before DDP wrapping. Aggregate response statistics here
+    # so every rank derives the same SVD basis and the same layer/rank allocation.
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        for _, adapter in adapters:
+            torch.distributed.all_reduce(adapter.gradient_sum, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(adapter.gradient_square_sum, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(adapter.gradient_samples, op=torch.distributed.ReduceOp.SUM)
+
     score_rows = []
     for name, adapter in adapters:
         score = adapter.finalize_calibration(init_scale=args.trso_basis_init_scale)
@@ -848,9 +860,15 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
 
     score_rows.sort(key=lambda item: item[1], reverse=True)
     print(f"[TRSO] Calibration batches={used_batches}; candidates={len(adapters)}; selected={len(selected)}")
+    adapter_map = dict(adapters)
     for name, score in score_rows[: min(10, len(score_rows))]:
         marker = "*" if name in selected else " "
-        print(f"[TRSO] {marker} {name}: response_score={score:.6e}")
+        adapter = adapter_map[name]
+        print(
+            f"[TRSO] {marker} {name}: response_score={score:.6e}; "
+            f"active_rank={adapter.active_rank}; "
+            f"trainable_cost={adapter.parameter_count_breakdown()['active_trainable']}"
+        )
 
     output_path = args.trso_save_config
     if not output_path and args.output_dir:

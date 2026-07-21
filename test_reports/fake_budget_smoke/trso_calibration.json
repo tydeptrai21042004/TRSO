@@ -1,15 +1,15 @@
 {
   "method": "Scientific-TRSO",
   "selected_layers": [
-    "layer2.0.pet_adapter",
-    "layer1.0.pet_adapter"
+    "layer1.0.pet_adapter",
+    "layer1.1.pet_adapter"
   ],
   "adapters": {
     "layer1.0.pet_adapter": {
       "channels": 64,
       "kernel_size": 5,
       "spatial_rank": 2,
-      "active_rank": 2,
+      "active_rank": 1,
       "operator_radius": 1.0,
       "enabled": true,
       "calibrated": true,
@@ -359,9 +359,9 @@
       "channels": 64,
       "kernel_size": 5,
       "spatial_rank": 2,
-      "active_rank": 0,
+      "active_rank": 1,
       "operator_radius": 1.0,
-      "enabled": false,
+      "enabled": true,
       "calibrated": true,
       "response_score": 0.6030945181846619,
       "response_noise": 0.49866700172424316,
@@ -709,9 +709,9 @@
       "channels": 128,
       "kernel_size": 5,
       "spatial_rank": 2,
-      "active_rank": 2,
+      "active_rank": 0,
       "operator_radius": 1.0,
-      "enabled": true,
+      "enabled": false,
       "calibrated": true,
       "response_score": 0.7640177607536316,
       "response_noise": 0.4394172430038452,

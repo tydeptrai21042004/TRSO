@@ -1,0 +1,33 @@
+{
+  "aligned_tangent_cosine_mean": 0.9999999776482582,
+  "aligned_tangent_cosine_min": 0.9999998211860657,
+  "legacy_surrogate_cosine_mean": 0.03897867728179941,
+  "legacy_surrogate_cosine_median": -0.11429043067619205,
+  "svd_optimal_relative_error": 0.2010936141014099,
+  "best_random_subspace_relative_error": 0.7691056728363037,
+  "random_to_svd_error_ratio": 3.824615099157002,
+  "channel_specific_output_mse": 1.9666468974166573e-12,
+  "shared_kernel_output_mse": 57.26109313964844,
+  "shared_to_specific_mse_ratio": 29116102750760.855,
+  "exact_budget_value": 18.0,
+  "greedy_budget_value": 12.0,
+  "exact_budget_selected": [
+    "small_a",
+    "small_b"
+  ],
+  "maximum_factorized_rank_during_training": 2,
+  "configured_factorized_rank": 2,
+  "transfer_source_accuracy_mean": 1.0,
+  "transfer_corrupted_accuracy_mean": 0.4716666638851166,
+  "transfer_trso_initial_accuracy_mean": 0.8476666808128357,
+  "transfer_random_initial_accuracy_mean": 0.5743333339691162,
+  "transfer_trso_one_epoch_accuracy_mean": 0.9943333387374877,
+  "transfer_random_one_epoch_accuracy_mean": 0.8893333196640014,
+  "transfer_full_kernel_one_epoch_accuracy_mean": 0.9973333358764649,
+  "transfer_trso_initial_accuracy_std": 0.0476981224827069,
+  "transfer_random_initial_accuracy_std": 0.05540355986191631,
+  "trso_trainable_parameters": 13,
+  "random_trainable_parameters": 13,
+  "full_kernel_trainable_parameters": 151
+}
+[ALL OK] Scientific TRSO experiments passed

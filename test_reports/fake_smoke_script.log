@@ -4,37 +4,37 @@ Namespace(backbone='resnet18', weights='none', list_backbones=False, pretrained=
 [Info] Backbone=resnet18 | tv_weights=none -> None | hub.pretrained=False
 [Info] Loaded resnet18 from torchvision.
 [TRSO] Calibration batches=2; candidates=8; selected=2
-[TRSO] * layer2.0.pet_adapter: response_score=1.560947e-01
-[TRSO] * layer3.0.pet_adapter: response_score=1.361095e-01
-[TRSO]   layer3.1.pet_adapter: response_score=1.123343e-01
-[TRSO]   layer2.1.pet_adapter: response_score=1.100571e-01
-[TRSO]   layer1.0.pet_adapter: response_score=3.701036e-02
-[TRSO]   layer1.1.pet_adapter: response_score=3.338332e-02
-[TRSO]   layer4.1.pet_adapter: response_score=1.390382e-02
-[TRSO]   layer4.0.pet_adapter: response_score=1.201173e-02
+[TRSO] * layer2.0.pet_adapter: response_score=7.640178e-01; active_rank=2; trainable_cost=257
+[TRSO] * layer1.0.pet_adapter: response_score=7.366384e-01; active_rank=2; trainable_cost=129
+[TRSO]   layer1.1.pet_adapter: response_score=6.030945e-01; active_rank=0; trainable_cost=0
+[TRSO]   layer2.1.pet_adapter: response_score=5.914522e-01; active_rank=0; trainable_cost=0
+[TRSO]   layer3.1.pet_adapter: response_score=3.903647e-01; active_rank=0; trainable_cost=0
+[TRSO]   layer3.0.pet_adapter: response_score=3.730835e-01; active_rank=0; trainable_cost=0
+[TRSO]   layer4.1.pet_adapter: response_score=2.302630e-01; active_rank=0; trainable_cost=0
+[TRSO]   layer4.0.pet_adapter: response_score=1.565974e-01; active_rank=0; trainable_cost=0
 [TRSO] Saved calibration config to test_reports/fake_smoke/trso_calibration.json
-memory_cost_MB: 11.303
-param_size_MB: 11.303
+memory_cost_MB: 11.238
+param_size_MB: 11.238
 act_size_MB: 0.000
-Number of trainable params: 12,298
-Number of total params: 11,265,828
+Number of trainable params: 2,438
+Number of total params: 11,230,412
 LR = 0.00030000
 Batch size = 4
 Number of training examples = 16
 Number of training steps per epoch = 4
-[ParamGroups] adapter_like=10,246 others=2,052
+[ParamGroups] adapter_like=386 others=2,052
 Set warmup steps = 0
 Set warmup steps = 0
 criterion = CrossEntropyLoss()
 Start training for 1 epochs
-Epoch: [0]  [0/4]  eta: 0:00:00  lr: 0.000300  min_lr: 0.000300  loss: 1.4615 (1.4615)  class_acc: 0.2500 (0.2500)  weight_decay: 0.0001 (0.0001)  time: 0.0465  data: 0.0049
-Epoch: [0]  [3/4]  eta: 0:00:00  lr: 0.000045  min_lr: 0.000045  loss: 1.3559 (1.3918)  class_acc: 0.2500 (0.3750)  weight_decay: 0.0001 (0.0001)  time: 0.0407  data: 0.0046
-Epoch: [0] Total time: 0:00:00 (0.0408 s / it)
-Averaged stats: lr: 0.000045  min_lr: 0.000045  loss: 1.3559 (1.3918)  class_acc: 0.2500 (0.3750)  weight_decay: 0.0001 (0.0001)  epoch_time: 0.1634 (0.1634)
-Test:  [0/2]  eta: 0:00:00  loss: 1.5070 (1.5070)  acc1: 25.0000 (25.0000)  time: 0.0282  data: 0.0046
-Test:  [1/2]  eta: 0:00:00  loss: 1.5070 (1.5080)  acc1: 0.0000 (12.5000)  time: 0.0267  data: 0.0041
-Test: Total time: 0:00:00 (0.0270 s / it)
-* Acc@1 12.500 loss 1.508
+Epoch: [0]  [0/4]  eta: 0:00:00  lr: 0.000300  min_lr: 0.000300  loss: 1.1895 (1.1895)  class_acc: 0.7500 (0.7500)  weight_decay: 0.0001 (0.0001)  time: 0.0425  data: 0.0046
+Epoch: [0]  [3/4]  eta: 0:00:00  lr: 0.000045  min_lr: 0.000045  loss: 1.1895 (1.3109)  class_acc: 0.2500 (0.4375)  weight_decay: 0.0001 (0.0001)  time: 0.0424  data: 0.0042
+Epoch: [0] Total time: 0:00:00 (0.0426 s / it)
+Averaged stats: lr: 0.000045  min_lr: 0.000045  loss: 1.1895 (1.3109)  class_acc: 0.2500 (0.4375)  weight_decay: 0.0001 (0.0001)  epoch_time: 0.1704 (0.1704)
+Test:  [0/2]  eta: 0:00:00  loss: 1.6814 (1.6814)  acc1: 25.0000 (25.0000)  time: 0.0224  data: 0.0039
+Test:  [1/2]  eta: 0:00:00  loss: 1.6814 (1.7434)  acc1: 0.0000 (12.5000)  time: 0.0226  data: 0.0037
+Test: Total time: 0:00:00 (0.0228 s / it)
+* Acc@1 12.500 loss 1.743
 Validation accuracy on 8 images: 12.500%
 Best validation accuracy: 12.500% at epoch 0
 Training time 0:00:00

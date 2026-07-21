@@ -1,0 +1,1 @@
+{"train_lr": 0.000187875, "train_min_lr": 0.000187875, "train_loss": 1.31087988615036, "train_class_acc": 0.4375, "train_weight_decay": 0.0001, "train_epoch_time": 0.18755698204040527, "val_loss": 1.7434841990470886, "val_acc1": 12.5, "epoch": 0, "n_trainable_parameters": 2182, "n_total_parameters": 11230412, "best_val_acc1": 12.5, "best_epoch": 0}

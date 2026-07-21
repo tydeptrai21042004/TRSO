@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""Fast TRSO preflight and synthetic research checks.
-
-This script does not download datasets or pretrained weights. It verifies:
-- CNN, ViT-token, class-token, and channels-last support;
-- task-response calibration and SVD basis discovery;
-- exact basis fusion;
-- stability projection;
-- gradient flow at the recommended non-zero gate;
-- a synthetic comparison against an axial-cross operator family;
-- a small CPU latency comparison between one fused 2-D operator and six
-  separate axial branches.
-"""
+"""Fast offline preflight for Scientific TRSO."""
 from __future__ import annotations
 
 import argparse
 import json
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -31,36 +19,14 @@ class PreflightReport:
     vit_shape_ok: bool
     cls_token_preserved: bool
     bhwc_shape_ok: bool
+    disabled_returns_same_tensor: bool
     fused_max_error: float
-    projected_kernel_l1: float
-    internal_gradient_l1: float
-    calibration_cosine: float
-    rank2_relative_error: float
-    axial_cross_relative_error: float
-    rank2_output_mse: float
-    axial_cross_output_mse: float
-    fused_latency_ms: float
-    six_axial_latency_ms: float
-    latency_ratio: float
-
-
-def _bench(fn, warmup=5, repeats=30):
-    for _ in range(warmup):
-        fn()
-    start = time.perf_counter()
-    for _ in range(repeats):
-        fn()
-    return (time.perf_counter() - start) * 1000.0 / repeats
-
-
-def _axial_cross_projection(kernel: torch.Tensor) -> torch.Tensor:
-    k = kernel.shape[0]
-    center = k // 2
-    projected = torch.zeros_like(kernel)
-    projected[center, :] = kernel[center, :]
-    projected[:, center] = kernel[:, center]
-    projected[center, center] = kernel[center, center]
-    return projected
+    maximum_channel_kernel_l1: float
+    coefficient_gradient_l1: float
+    calibration_tangent_cosine: float
+    recovered_kernel_cosine: float
+    recovered_channel_spatial_rank: int
+    configured_rank: int
 
 
 def run(device: torch.device) -> PreflightReport:
@@ -71,7 +37,6 @@ def run(device: torch.device) -> PreflightReport:
         channels=8,
         kernel_size=5,
         spatial_rank=2,
-        channel_ratio=4,
         operator_radius=0.7,
         gate_init=1e-2,
     ).to(device)
@@ -85,123 +50,121 @@ def run(device: torch.device) -> PreflightReport:
     y_cls = adapter(vit_cls)
     y_bhwc = adapter(bhwc)
 
-    z = torch.randn(2, adapter.hidden_channels, 12, 12, device=device)
-    explicit = adapter.explicit_basis_response(z)
-    fused = adapter._shared_depthwise(z, adapter.projected_fused_kernel())
+    explicit = adapter.explicit_basis_response(cnn)
+    fused = adapter._depthwise(cnn, adapter.projected_kernel_bank())
     fused_error = float((explicit - fused).abs().max().item())
-
-    loss = y_cnn.square().mean()
-    loss.backward()
-    internal_grad = float(adapter.down.weight.grad.abs().sum().item() + adapter.coefficients.grad.abs().sum().item())
-
-    # Synthetic task-response recovery from an impulse experiment.
-    target = torch.tensor(
-        [
-            [0.00, 0.00, 0.12, 0.00, -0.05],
-            [0.00, 0.18, 0.00, -0.12, 0.00],
-            [0.08, 0.00, 0.32, 0.00, 0.08],
-            [0.00, -0.12, 0.00, 0.18, 0.00],
-            [-0.05, 0.00, 0.12, 0.00, 0.00],
-        ],
-        device=device,
+    maximum_l1 = float(
+        adapter.projected_kernel_bank().abs().sum(dim=(1, 2)).max().item()
     )
+
+    y_cnn.square().mean().backward()
+    coefficient_gradient = float(
+        sum(
+            parameter.grad.abs().sum().item()
+            for parameter in adapter.coefficient_vectors
+        )
+    )
+
+    # Exact calibration/training tangent check.
+    aligned = TaskResponseSpatialAdapter(
+        channels=4,
+        kernel_size=3,
+        spatial_rank=2,
+        operator_radius=10.0,
+        gate_init=1.0,
+        calibration_scale=1.0,
+    ).to(device)
+    x = torch.randn(3, 4, 9, 9, device=device)
+    target = torch.randn_like(x)
+    aligned.start_calibration()
+    F.mse_loss(aligned(x), target).backward()
+    probe_gradient = aligned.probe_kernel.grad.detach().clone()
+    aligned.stop_calibration()
+    full_kernel = torch.zeros(4, 3, 3, device=device, requires_grad=True)
+    direct = x + F.conv2d(x, full_kernel.unsqueeze(1), padding=1, groups=4)
+    F.mse_loss(direct, target).backward()
+    tangent_cosine = float(
+        F.cosine_similarity(
+            probe_gradient.flatten(), full_kernel.grad.flatten(), dim=0
+        ).item()
+    )
+
+    # Recover a known rank-two channel--spatial kernel bank.
     calibrator = TaskResponseSpatialAdapter(
-        channels=1,
+        channels=4,
         kernel_size=5,
         spatial_rank=2,
-        channel_ratio=1,
         operator_radius=10.0,
-        gate_init=1e-2,
+        gate_init=1.0,
     ).to(device)
-    impulse = torch.zeros(16, 1, 13, 13, device=device)
+    atoms = torch.randn(2, 5, 5, device=device)
+    channel_coefficients = torch.randn(4, 2, device=device)
+    target_bank = (channel_coefficients @ atoms.flatten(1)).reshape(4, 5, 5)
+    impulse = torch.zeros(16, 4, 13, 13, device=device)
     impulse[:, :, 6, 6] = 1.0
-    desired = impulse + F.conv2d(impulse, target.view(1, 1, 5, 5), padding=2)
+    desired = impulse + F.conv2d(
+        impulse, target_bank.unsqueeze(1), padding=2, groups=4
+    )
     calibrator.start_calibration()
     F.mse_loss(calibrator(impulse), desired).backward()
     calibrator.accumulate_probe_gradient()
     calibrator.finalize_calibration(init_scale=1.0)
-    discovered = calibrator.raw_fused_kernel().detach()
-    cosine = float(F.cosine_similarity(discovered.flatten(), target.flatten(), dim=0).item())
+    discovered = calibrator.raw_kernel_bank().detach()
+    recovery_cosine = float(
+        F.cosine_similarity(discovered.flatten(), target_bank.flatten(), dim=0).item()
+    )
+    observed_rank = int(torch.linalg.matrix_rank(discovered.flatten(1)).item())
 
-    # Approximation comparison: best rank-2 2-D operator vs axial-cross support.
-    u, s, vh = torch.linalg.svd(target, full_matrices=False)
-    rank2 = (u[:, :2] * s[:2]) @ vh[:2]
-    axial = _axial_cross_projection(target)
-    target_norm = target.norm().clamp_min(1e-12)
-    rank2_err = float(((target - rank2).norm() / target_norm).item())
-    axial_err = float(((target - axial).norm() / target_norm).item())
-
-    signal = torch.randn(32, 1, 32, 32, device=device)
-    target_y = F.conv2d(signal, target.view(1, 1, 5, 5), padding=2)
-    rank2_y = F.conv2d(signal, rank2.view(1, 1, 5, 5), padding=2)
-    axial_y = F.conv2d(signal, axial.view(1, 1, 5, 5), padding=2)
-    rank2_mse = float(F.mse_loss(rank2_y, target_y).item())
-    axial_mse = float(F.mse_loss(axial_y, target_y).item())
-
-    # Structural latency check: one fused 5x5 depthwise convolution vs six
-    # independent 1-D axial branch launches. This is a microbenchmark, not a GPU claim.
-    feature = torch.randn(8, 64, 28, 28, device=device)
-    fused_weight = torch.randn(64, 1, 5, 5, device=device)
-    h_weights = [torch.randn(64, 1, 5, 1, device=device) for _ in range(3)]
-    w_weights = [torch.randn(64, 1, 1, 5, device=device) for _ in range(3)]
-
-    def fused_call():
-        return F.conv2d(feature, fused_weight, padding=2, groups=64)
-
-    def axial_call():
-        out = 0.0
-        for weight in h_weights:
-            out = out + F.conv2d(feature, weight, padding=(2, 0), groups=64)
-        for weight in w_weights:
-            out = out + F.conv2d(feature, weight, padding=(0, 2), groups=64)
-        return out
-
-    with torch.no_grad():
-        fused_ms = _bench(fused_call)
-        axial_ms = _bench(axial_call)
+    disabled = TaskResponseSpatialAdapter(channels=8, kernel_size=5, spatial_rank=2).to(device)
+    disabled.set_active_rank(0)
+    disabled_tokens = torch.randn(2, 145, 8, device=device)
+    disabled_output = disabled(disabled_tokens)
 
     return PreflightReport(
         cnn_shape_ok=tuple(y_cnn.shape) == tuple(cnn.shape),
         vit_shape_ok=tuple(y_vit.shape) == tuple(vit.shape),
         cls_token_preserved=bool(torch.equal(y_cls[:, :1], vit_cls[:, :1])),
         bhwc_shape_ok=tuple(y_bhwc.shape) == tuple(bhwc.shape),
+        disabled_returns_same_tensor=disabled_output is disabled_tokens,
         fused_max_error=fused_error,
-        projected_kernel_l1=float(adapter.projected_fused_kernel().abs().sum().item()),
-        internal_gradient_l1=internal_grad,
-        calibration_cosine=cosine,
-        rank2_relative_error=rank2_err,
-        axial_cross_relative_error=axial_err,
-        rank2_output_mse=rank2_mse,
-        axial_cross_output_mse=axial_mse,
-        fused_latency_ms=fused_ms,
-        six_axial_latency_ms=axial_ms,
-        latency_ratio=axial_ms / max(fused_ms, 1e-12),
+        maximum_channel_kernel_l1=maximum_l1,
+        coefficient_gradient_l1=coefficient_gradient,
+        calibration_tangent_cosine=tangent_cosine,
+        recovered_kernel_cosine=recovery_cosine,
+        recovered_channel_spatial_rank=observed_rank,
+        configured_rank=2,
     )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="auto")
     parser.add_argument("--json", default="")
     args = parser.parse_args()
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
+    device = torch.device(
+        "cuda"
+        if args.device == "auto" and torch.cuda.is_available()
+        else ("cpu" if args.device == "auto" else args.device)
+    )
     report = run(device)
     payload = asdict(report)
     print(json.dumps(payload, indent=2))
 
-    assert report.cnn_shape_ok and report.vit_shape_ok and report.cls_token_preserved and report.bhwc_shape_ok
+    assert report.cnn_shape_ok and report.vit_shape_ok
+    assert report.cls_token_preserved and report.bhwc_shape_ok
+    assert report.disabled_returns_same_tensor
     assert report.fused_max_error < 2e-5
-    assert report.projected_kernel_l1 <= 0.70001
-    assert report.internal_gradient_l1 > 0.0
-    assert report.calibration_cosine > 0.95
-    assert report.rank2_relative_error < report.axial_cross_relative_error
-    assert report.rank2_output_mse < report.axial_cross_output_mse
+    assert report.maximum_channel_kernel_l1 <= 0.70001
+    assert report.coefficient_gradient_l1 > 0.0
+    assert report.calibration_tangent_cosine > 0.999999
+    assert report.recovered_kernel_cosine > 0.9999
+    assert report.recovered_channel_spatial_rank <= report.configured_rank
 
     if args.json:
         path = Path(args.json)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print("[ALL OK] TRSO preflight passed")
+    print("[ALL OK] Scientific TRSO preflight passed")
 
 
 if __name__ == "__main__":

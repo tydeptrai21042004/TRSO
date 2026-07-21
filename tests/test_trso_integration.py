@@ -126,7 +126,7 @@ class TRSOIntegrationTest(unittest.TestCase):
         loss.backward()
         optimizer.step()
         self.assertFalse(torch.equal(before, model.adapter_a.coefficients.detach()))
-        self.assertIsNone(model.adapter_b.coefficients.grad)
+        self.assertTrue(all(parameter.grad is None for parameter in model.adapter_b.coefficient_vectors))
 
 
 if __name__ == "__main__":

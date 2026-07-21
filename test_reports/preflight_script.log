@@ -3,18 +3,15 @@
   "vit_shape_ok": true,
   "cls_token_preserved": true,
   "bhwc_shape_ok": true,
-  "fused_max_error": 1.4901161193847656e-08,
-  "projected_kernel_l1": 0.1414213478565216,
-  "internal_gradient_l1": 1.42972083949644e-07,
-  "calibration_cosine": 0.9683534502983093,
-  "rank2_relative_error": 0.24958322942256927,
-  "axial_cross_relative_error": 0.6375188827514648,
-  "rank2_output_mse": 0.0135853486135602,
-  "axial_cross_output_mse": 0.09249445796012878,
-  "fused_latency_ms": 0.3718000333416664,
-  "six_axial_latency_ms": 9.966125299979467,
-  "latency_ratio": 26.805068333119475
+  "disabled_returns_same_tensor": true,
+  "fused_max_error": 1.1175870895385742e-08,
+  "maximum_channel_kernel_l1": 0.07112492620944977,
+  "coefficient_gradient_l1": 0.0035318545267273294,
+  "calibration_tangent_cosine": 1.0,
+  "recovered_kernel_cosine": 1.0,
+  "recovered_channel_spatial_rank": 2,
+  "configured_rank": 2
 }
-[ALL OK] TRSO preflight passed
-....................                                                     [100%]
-20 passed in 2.92s
+[ALL OK] Scientific TRSO preflight passed
+........................                                                 [100%]
+24 passed in 3.30s

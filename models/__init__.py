@@ -3,7 +3,6 @@
 import torch
 import torch.nn as nn
 
-from .backbones import *           # resnet50, ...
 from .heads import *               # LinearHead
 from .tuning_modules import set_tuning_config
 from .layers.ws_conv import WSConv2d
@@ -11,6 +10,21 @@ from .layers.ws_conv import WSConv2d
 from .tuning_modules.side_tuning import SideTuningClassifier
 
 __all__ = ['build_model']
+
+def _load_legacy_backbones():
+    """Load the inherited local backbone catalogue only when requested.
+
+    The primary training path uses torchvision/timm directly. Keeping this
+    import lazy allows dataset, adapter, and test utilities to run when the
+    optional timm dependency is not installed.
+    """
+    import importlib
+    module = importlib.import_module(".backbones", __name__)
+    for name in dir(module):
+        if not name.startswith("_"):
+            globals().setdefault(name, getattr(module, name))
+
+
 
 
 def replace_conv2d_with_my_conv2d(net, ws_eps=None):
@@ -52,8 +66,6 @@ def _normalize_tuning_method(tuning_method: str) -> str:
         "sidetuning": "sidetune",
         "side_tune": "sidetune",
 
-        "lora": "lora_conv",
-        "lora-conv": "lora_conv",
     }
     return alias.get(str(tuning_method), str(tuning_method))
 
@@ -78,6 +90,13 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
     'sidetune' wraps a frozen backbone with a lightweight side network + alpha blending.
     """
     tm = _normalize_tuning_method(tuning_method)
+    if tm not in {"full", "linear"}:
+        raise RuntimeError(
+            "The inherited local-backbone builder is disabled for strict paper baselines. "
+            "Use main.build_model_for_experiment(), which enforces the published architecture, "
+            "insertion points, and trainability contract."
+        )
+    _load_legacy_backbones()
 
     # 1) Build the base backbone
     tuning_config = _safe_tuning_config(tm, args)
@@ -108,12 +127,6 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
         model.head = LinearHead(model.num_features, num_classes, dropout=0.2)
 
 
-    # 2.5) Apply LoRA replacement (builder-path support)
-    if tm == 'lora_conv':
-        from .tuning_modules.lora_conv import apply_lora_conv2d
-        r = int(getattr(args, 'lora_r', 4))
-        alpha = float(getattr(args, 'lora_alpha', 1.0))
-        apply_lora_conv2d(model, r=r, alpha=alpha)
 
     # 3) Freeze/unfreeze according to tuning method
     if tm == 'full':
@@ -221,16 +234,6 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
                 continue
             p.requires_grad = False
 
-    elif tm == 'lora_conv':
-        # Train head + LoRA params (and optionally norms, keep consistent with conv_adapt)
-        for name, p in model.named_parameters():
-            if name.startswith('head'):
-                continue
-            if 'lora_' in name or 'lora_down' in name or 'lora_up' in name or 'LoRA' in name:
-                continue
-            if 'norm' in name:
-                continue
-            p.requires_grad = False
 
     if 'repnet' in str(tm):
         replace_conv2d_with_my_conv2d(model, 1e-5)

@@ -1,143 +1,118 @@
-# tests/test_baseline_integration.py
-"""Integration tests for all CNN PEFT baselines exposed by main.py.
-
-The goal is not to reproduce paper accuracies. These tests verify that each
-baseline follows the intended fair protocol:
-
-* Full fine-tuning: backbone and head train.
-* Linear probe: backbone frozen, head trains.
-* PEFT baselines: backbone frozen, baseline module + head train.
-* Forward pass is runnable without dataset download or pretrained weights.
-"""
+"""Factory and trainability tests for strict paper reproductions."""
 from __future__ import annotations
 
-import unittest
+from types import SimpleNamespace
 
+import pytest
 import torch
 
-from main import canonicalize_args, get_args_parser, build_model_for_experiment, set_trainability_policy
-from models.tuning_modules.bam_adapter import BAMAdapter
-from models.tuning_modules.lora_conv import LoRAConv2d
-from models.tuning_modules.residual_adapter import ParallelResidualAdapter, SeriesResidualAdapter
+from main import build_model_for_experiment, canonicalize_args, get_args_parser, set_trainability_policy
+from models.tuning_modules.bam_adapter import BAM, BAMResNet50
+from models.tuning_modules.conv_adapter import ConvAdapter, ConvAdapterBottleneck
+from models.tuning_modules.prompter import VisualPromptingClassifier
+from models.tuning_modules.residual_adapter import ResidualAdapterResNet26
 from models.tuning_modules.side_tuning import SideTuningClassifier
-from models.tuning_modules.ssf import SSF
-from models.task_response_adapter import TaskResponseSpatialAdapter
 
 
-METHODS = [
-    "full",
-    "linear",
-    "bitfit",
-    "conv",
-    "trso",
-    "bam",
-    "residual",
-    "ssf",
-    "lora_conv",
-    "sidetune",
-]
+def make_args(method: str, backbone: str, size: int = 64):
+    parser = get_args_parser()
+    args = parser.parse_args([
+        "--backbone", backbone,
+        "--weights", "none",
+        "--pretrained", "False",
+        "--tuning_method", method,
+        "--nb_classes", "5",
+        "--input_size", str(size),
+        "--device", "cpu",
+        "--use_amp", "False",
+        "--profile_efficiency", "False",
+        "--save_ckpt", "False",
+        "--final_test", "False",
+        "--batch_size", "1",
+        "--num_workers", "0",
+        "--prompt_size", "2",
+        "--trso_calibration", "False",
+    ])
+    return canonicalize_args(args)
 
 
-class BaselineIntegrationFaithfulnessTest(unittest.TestCase):
-    @staticmethod
-    def make_args(method: str):
-        parser = get_args_parser()
-        args = parser.parse_args([
-            "--backbone", "resnet18",
-            "--weights", "none",
-            "--pretrained", "False",
-            "--tuning_method", method,
-            "--nb_classes", "5",
-            "--input_size", "64",
-            "--device", "cpu",
-            "--use_amp", "False",
-            "--profile_efficiency", "False",
-            "--save_ckpt", "False",
-            "--final_test", "False",
-            "--batch_size", "2",
-            "--num_workers", "0",
-            "--bam_insert", "stage",
-            "--bam_stages", "1,2,3,4",
-            "--trso_calibration", "False",
-            "--trso_channel_ratio", "16",
-        ])
-        return canonicalize_args(args)
-
-    def build(self, method: str):
-        args = self.make_args(method)
-        model, adapter_ids = build_model_for_experiment(args)
-        model = set_trainability_policy(model, args, extra_adapter_param_ids=adapter_ids)
-        model.eval()
-        return args, model
-
-    def assert_forward_runs(self, model):
-        x = torch.randn(2, 3, 64, 64)
-        with torch.no_grad():
-            y = model(x)
-        self.assertEqual(tuple(y.shape), (2, 5))
-
-    def trainable_names(self, model):
-        return [n for n, p in model.named_parameters() if p.requires_grad]
-
-    def test_all_baselines_forward_and_trainability(self):
-        for method in METHODS:
-            with self.subTest(method=method):
-                args, model = self.build(method)
-                self.assert_forward_runs(model)
-                trainable = self.trainable_names(model)
-                self.assertGreater(len(trainable), 0, f"{method} should have trainable parameters.")
-
-                if method == "full":
-                    self.assertTrue(any(n.startswith("conv1.") for n in trainable), "Full FT must train backbone conv1.")
-                    self.assertTrue(any(n.startswith("fc.") for n in trainable), "Full FT must train classifier head.")
-
-                elif method == "linear":
-                    self.assertTrue(all(n.startswith("fc.") for n in trainable), f"Linear probe should train only fc, got {trainable[:10]}")
-
-                elif method == "bitfit":
-                    self.assertTrue(any(n.startswith("fc.") for n in trainable), "BitFit should train classifier head.")
-                    self.assertFalse(any(n == "conv1.weight" for n in trainable), "BitFit must not train backbone conv weights.")
-                    self.assertTrue(all(n.endswith(".bias") or n.startswith("fc.") for n in trainable), "BitFit should train only biases + head.")
-
-                elif method == "sidetune":
-                    self.assertIsInstance(model, SideTuningClassifier)
-                    self.assertTrue(any(n.startswith("side_net.") for n in trainable))
-                    self.assertTrue(any(n.startswith("head.") for n in trainable))
-                    self.assertTrue(any(n == "alpha_logit" for n in trainable))
-                    self.assertFalse(any(n.startswith("base.") for n in trainable), "Side-tuning base must stay frozen.")
-
-                else:
-                    self.assertTrue(any(n.startswith("fc.") for n in trainable), f"{method} should train classifier head.")
-                    self.assertFalse(any(n == "conv1.weight" for n in trainable), f"{method} must freeze backbone conv1.")
-                    if method == "trso":
-                        self.assertTrue(any(isinstance(m, TaskResponseSpatialAdapter) for m in model.modules()))
-                        probes = [p for n, p in model.named_parameters() if n.endswith("probe_kernel")]
-                        self.assertTrue(probes)
-                        self.assertTrue(all(not p.requires_grad for p in probes))
-                    if method == "bam":
-                        self.assertTrue(any(isinstance(m, BAMAdapter) for m in model.modules()))
-                    if method == "ssf":
-                        self.assertTrue(any(isinstance(m, SSF) for m in model.modules()))
-                    if method == "lora_conv":
-                        self.assertTrue(any(isinstance(m, LoRAConv2d) for m in model.modules()))
-                        self.assertTrue(any("lora_down" in n or "lora_up" in n for n in trainable))
-                    if method == "residual":
-                        self.assertTrue(any(isinstance(m, (ParallelResidualAdapter, SeriesResidualAdapter)) for m in model.modules()))
-                        self.assertTrue(any("core." in n or n.endswith("gate") for n in trainable))
-                        self.assertFalse(any(".block." in n for n in trainable), "Residual Adapter wrapped backbone block must remain frozen.")
-
-    def test_bam_stage_insertion_count(self):
-        _, model = self.build("bam")
-        n_bam = sum(1 for m in model.modules() if isinstance(m, BAMAdapter))
-        self.assertEqual(n_bam, 4, "BAM-stage should insert one module after each ResNet stage.")
-
-    def test_lora_no_recursive_wrapping_in_integration(self):
-        _, model = self.build("lora_conv")
-        wrappers = [m for m in model.modules() if isinstance(m, LoRAConv2d)]
-        self.assertGreater(len(wrappers), 0)
-        for w in wrappers:
-            self.assertNotIsInstance(w.base, LoRAConv2d)
+def build(method, backbone, size=64):
+    args = make_args(method, backbone, size)
+    model, ids = build_model_for_experiment(args)
+    model = set_trainability_policy(model, args, ids)
+    return args, model
 
 
-if __name__ == "__main__":
-    unittest.main()
+def trainable(model):
+    return {name for name, p in model.named_parameters() if p.requires_grad}
+
+
+def test_full_and_linear_contracts():
+    _, full = build("full", "resnet18")
+    assert "conv1.weight" in trainable(full) and "fc.weight" in trainable(full)
+    _, linear = build("linear", "resnet18")
+    assert trainable(linear) == {"fc.weight", "fc.bias"}
+
+
+def test_visual_prompt_factory_keeps_original_head_frozen():
+    _, model = build("prompt", "resnet18")
+    assert isinstance(model, VisualPromptingClassifier)
+    names = trainable(model)
+    assert names and all(name.startswith("tuning_module.") for name in names)
+    assert model.backbone.fc.out_features == 1000
+    model.eval()
+    assert model(torch.randn(1, 3, 64, 64)).shape == (1, 5)
+
+
+def test_conv_adapter_resnet50_factory_and_trainability():
+    _, model = build("conv", "resnet50")
+    names = trainable(model)
+    assert any(isinstance(module, ConvAdapterBottleneck) for module in model.modules())
+    assert any(isinstance(module, ConvAdapter) for module in model.modules())
+    assert any("adapter." in name for name in names)
+    assert "fc.weight" in names
+    assert "conv1.weight" not in names
+    model.eval()
+    assert model(torch.randn(1, 3, 64, 64)).shape == (1, 5)
+
+
+def test_bam_is_end_to_end_resnet50_with_three_transition_modules():
+    _, model = build("bam", "resnet50")
+    assert isinstance(model, BAMResNet50)
+    assert sum(isinstance(module, BAM) for module in model.modules()) == 3
+    names = trainable(model)
+    assert "conv1.weight" in names and "fc.weight" in names
+    model.eval()
+    assert model(torch.randn(1, 3, 64, 64)).shape == (1, 5)
+
+
+def test_residual_adapter_factory_uses_dedicated_resnet26():
+    _, model = build("residual", "resnet18")
+    assert isinstance(model, ResidualAdapterResNet26)
+    names = trainable(model)
+    assert "conv1.weight" not in names
+    assert "fc.weight" in names
+    assert any("adapter" in name for name in names)
+    assert any("bn" in name for name in names)
+    model.eval()
+    assert model(torch.randn(1, 3, 64, 64)).shape == (1, 5)
+
+
+def test_side_tuning_trains_copied_side_not_base():
+    _, model = build("sidetune", "resnet18")
+    assert isinstance(model, SideTuningClassifier)
+    names = trainable(model)
+    assert any(name.startswith("side.") for name in names)
+    assert any(name.startswith("head.") for name in names)
+    assert "alpha_logit" in names
+    assert not any(name.startswith("base.") for name in names)
+
+
+def test_unsupported_paper_domain_pairs_fail_explicitly():
+    with pytest.raises(ValueError, match="ResNet-50"):
+        build("conv", "resnet18")
+    with pytest.raises(ValueError, match="ResNet-50"):
+        build("bam", "resnet18")
+    args = make_args("lora_conv", "resnet18")
+    with pytest.raises(ValueError, match="Unknown tuning method"):
+        build_model_for_experiment(args)

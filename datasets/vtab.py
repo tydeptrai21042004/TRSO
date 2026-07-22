@@ -1,30 +1,19 @@
-import os
-from torchvision.datasets.folder import ImageFolder, default_loader
+"""Compatibility exports for the active VTAB list-file implementation."""
+from __future__ import annotations
+
+from .build import ListFileDataset
 
 
-class VTABDataset(ImageFolder):
+class VTABDataset(ListFileDataset):
+    """Backward-compatible wrapper around the active VTAB list loader."""
+
     def __init__(self, root, train=True, transform=None, target_transform=None, is_tuning=True, **kwargs):
-        self.dataset_root = root
-        self.loader = default_loader
-        self.target_transform = target_transform
-        self.transform = transform
+        del target_transform, kwargs
         if is_tuning:
-            train_list_path = os.path.join(self.dataset_root, 'train800.txt')
-            test_list_path = os.path.join(self.dataset_root, 'val200.txt')
+            filename = "train800.txt" if train else "val200.txt"
         else:
-            train_list_path = os.path.join(self.dataset_root, 'train800val200.txt')
-            test_list_path = os.path.join(self.dataset_root, 'test.txt')
+            filename = "train800val200.txt" if train else "test.txt"
+        super().__init__(root=root, list_file=filename, transform=transform)
 
-        self.samples = []
-        if train:
-            with open(train_list_path, 'r') as f:
-                for line in f:
-                    img_name = line.split(' ')[0]
-                    label = int(line.split(' ')[1])
-                    self.samples.append((os.path.join(root,img_name), label))
-        else:
-            with open(test_list_path, 'r') as f:
-                for line in f:
-                    img_name = line.split(' ')[0]
-                    label = int(line.split(' ')[1])
-                    self.samples.append((os.path.join(root,img_name), label))
+
+__all__ = ["VTABDataset", "ListFileDataset"]

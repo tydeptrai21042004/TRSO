@@ -1,0 +1,12 @@
+{
+  "best_val_acc1": 25.0,
+  "primary_metric": "acc1",
+  "maximize_primary_metric": true,
+  "best_epoch": 0,
+  "total_train_time_sec": 0.05996537208557129,
+  "epochs": 1,
+  "n_trainable_parameters": 720,
+  "n_total_parameters": 11690232,
+  "epochs_to_95pct_best": 1,
+  "mean_epoch_time_sec": 0.052025556564331055
+}

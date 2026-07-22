@@ -1,14 +1,4 @@
-# engine.py
-"""
-Training/evaluation loops for revision experiments.
-
-Revision fixes:
-1. Evaluation no longer crashes for datasets with fewer than 5 classes.
-2. Training returns epoch time and peak CUDA memory for efficiency tables.
-3. Evaluation can return latency and peak inference memory when requested.
-4. AMP autocast is safely disabled on CPU.
-"""
-
+"""Shared training/evaluation loops for classification, multi-label, regression."""
 from __future__ import annotations
 
 import math
@@ -17,22 +7,26 @@ from contextlib import nullcontext
 from typing import Iterable, Optional
 
 import torch
-from timm.data import Mixup
-from timm.utils import ModelEma, accuracy
+try:
+    from timm.data import Mixup
+    from timm.utils import ModelEma, accuracy
+except Exception:
+    from compat.timm_compat import Mixup, ModelEma, accuracy
 
 import utils
 
 
+TASK_SINGLE_LABEL = "single_label"
+TASK_MULTILABEL = "multilabel"
+TASK_REGRESSION = "regression"
+
+
 def _amp_context(device: torch.device, enabled: bool):
     enabled = bool(enabled and device.type == "cuda" and torch.cuda.is_available())
-    if enabled:
-        return torch.amp.autocast(device_type="cuda")
-    return nullcontext()
-
+    return torch.amp.autocast(device_type="cuda") if enabled else nullcontext()
 
 
 def _set_frozen_batchnorm_eval(model: torch.nn.Module) -> None:
-    """Keep frozen BatchNorm statistics fixed after model.train(True)."""
     for module in model.modules():
         if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
             affine_trainable = any(
@@ -41,6 +35,25 @@ def _set_frozen_batchnorm_eval(model: torch.nn.Module) -> None:
             )
             if not affine_trainable:
                 module.eval()
+
+
+def _extract_output(output):
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, (tuple, list)) and output and isinstance(output[0], torch.Tensor):
+        return output[0]
+    if isinstance(output, dict):
+        for key in ("logits", "out", "pred"):
+            if isinstance(output.get(key), torch.Tensor):
+                return output[key]
+    raise TypeError(f"Unsupported model output type: {type(output)!r}")
+
+
+def _prepare_target(target: torch.Tensor, task_type: str) -> torch.Tensor:
+    if task_type == TASK_SINGLE_LABEL:
+        return target.long()
+    return target.float()
+
 
 def train_one_epoch(
     model: torch.nn.Module,
@@ -61,21 +74,18 @@ def train_one_epoch(
     num_training_steps_per_epoch=None,
     update_freq=None,
     use_amp: bool = False,
+    task_type: str = TASK_SINGLE_LABEL,
 ):
     model.train(True)
     _set_frozen_batchnorm_eval(model)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     metric_logger.add_meter("min_lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
-    header = f"Epoch: [{epoch}]"
-    print_freq = 10
+    header, print_freq = f"Epoch: [{epoch}]", 10
 
-    if update_freq is None:
-        update_freq = 1
-    if start_steps is None:
-        start_steps = 0
-    if num_training_steps_per_epoch is None:
-        num_training_steps_per_epoch = len(data_loader)
+    update_freq = int(update_freq or 1)
+    start_steps = int(start_steps or 0)
+    num_training_steps_per_epoch = int(num_training_steps_per_epoch or len(data_loader))
 
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
@@ -84,40 +94,42 @@ def train_one_epoch(
     epoch_start = time.time()
     optimizer.zero_grad(set_to_none=True)
 
-    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        samples, targets = batch[0], batch[1]
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
             continue
-        it = start_steps + step
+        iteration = start_steps + step
 
-        if (data_iter_step % update_freq) == 0:
+        if data_iter_step % update_freq == 0:
             if lr_schedule_values is not None:
-                for param_group in optimizer.param_groups:
-                    param_group["lr"] = lr_schedule_values[it]
+                for group in optimizer.param_groups:
+                    group["lr"] = lr_schedule_values[iteration]
             if wd_schedule_values is not None:
-                for param_group in optimizer.param_groups:
-                    if param_group.get("weight_decay", 0) > 0:
-                        param_group["weight_decay"] = wd_schedule_values[it]
+                for group in optimizer.param_groups:
+                    if group.get("weight_decay", 0) > 0:
+                        group["weight_decay"] = wd_schedule_values[iteration]
 
         samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-
+        targets = _prepare_target(targets.to(device, non_blocking=True), task_type)
         if mixup_fn is not None:
+            if task_type != TASK_SINGLE_LABEL:
+                raise ValueError("Mixup/CutMix is supported only for single-label classification.")
             samples, targets = mixup_fn(samples, targets)
 
         with _amp_context(device, use_amp):
-            output = model(samples)
+            output = _extract_output(model(samples))
             loss = criterion(output, targets)
 
-        loss_value = loss.item()
+        loss_value = float(loss.item())
         if not math.isfinite(loss_value):
             raise FloatingPointError(f"Loss is not finite: {loss_value}")
 
-        loss = loss / update_freq
+        scaled_loss = loss / update_freq
         if use_amp and device.type == "cuda":
             is_second_order = hasattr(optimizer, "is_second_order") and optimizer.is_second_order
             grad_norm = loss_scaler(
-                loss,
+                scaled_loss,
                 optimizer,
                 clip_grad=max_norm,
                 parameters=model.parameters(),
@@ -129,7 +141,7 @@ def train_one_epoch(
                 if model_ema is not None:
                     model_ema.update(model)
         else:
-            loss.backward()
+            scaled_loss.backward()
             grad_norm = None
             if (data_iter_step + 1) % update_freq == 0:
                 if max_norm is not None and max_norm > 0:
@@ -142,131 +154,143 @@ def train_one_epoch(
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
 
-        if mixup_fn is None:
-            class_acc = (output.max(-1)[-1] == targets).float().mean()
-        else:
-            class_acc = None
-
         metric_logger.update(loss=loss_value)
-        if class_acc is not None:
-            metric_logger.update(class_acc=class_acc.item())
+        if task_type == TASK_SINGLE_LABEL and mixup_fn is None:
+            batch_acc = (output.argmax(dim=-1) == targets).float().mean()
+            metric_logger.update(class_acc=float(batch_acc.item()))
+        elif task_type == TASK_REGRESSION:
+            metric_logger.update(batch_mae=float((output - targets).abs().mean().item()))
 
         min_lr = min(group["lr"] for group in optimizer.param_groups)
         max_lr = max(group["lr"] for group in optimizer.param_groups)
-        metric_logger.update(lr=max_lr)
-        metric_logger.update(min_lr=min_lr)
-
-        weight_decay_value = None
-        for group in optimizer.param_groups:
-            if group.get("weight_decay", 0) > 0:
-                weight_decay_value = group["weight_decay"]
-        if weight_decay_value is not None:
-            metric_logger.update(weight_decay=weight_decay_value)
+        metric_logger.update(lr=max_lr, min_lr=min_lr)
+        positive_wd = [group["weight_decay"] for group in optimizer.param_groups if group.get("weight_decay", 0) > 0]
+        if positive_wd:
+            metric_logger.update(weight_decay=positive_wd[-1])
         if grad_norm is not None:
             metric_logger.update(grad_norm=float(grad_norm))
 
         if log_writer is not None:
             log_writer.update(loss=loss_value, head="loss")
-            if class_acc is not None:
-                log_writer.update(class_acc=class_acc.item(), head="loss")
-            log_writer.update(lr=max_lr, head="opt")
-            log_writer.update(min_lr=min_lr, head="opt")
-            if weight_decay_value is not None:
-                log_writer.update(weight_decay=weight_decay_value, head="opt")
-            if grad_norm is not None:
-                log_writer.update(grad_norm=float(grad_norm), head="opt")
+            log_writer.update(lr=max_lr, min_lr=min_lr, head="opt")
             log_writer.set_step()
-
-        if wandb_logger:
-            payload = {
-                "Rank-0 Batch Wise/train_loss": loss_value,
-                "Rank-0 Batch Wise/train_max_lr": max_lr,
-                "Rank-0 Batch Wise/train_min_lr": min_lr,
-                "Rank-0 Batch Wise/global_train_step": it,
-            }
-            if class_acc is not None:
-                payload["Rank-0 Batch Wise/train_class_acc"] = class_acc.item()
-            if grad_norm is not None:
-                payload["Rank-0 Batch Wise/train_grad_norm"] = float(grad_norm)
-            wandb_logger._wandb.log(payload)
 
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(device)
-    epoch_time = time.time() - epoch_start
-    metric_logger.update(epoch_time=epoch_time)
-
+    metric_logger.update(epoch_time=time.time() - epoch_start)
     if device.type == "cuda" and torch.cuda.is_available():
-        peak_train_memory_mb = torch.cuda.max_memory_allocated(device) / 1024**2
-        metric_logger.update(peak_train_memory_mb=peak_train_memory_mb)
-
+        metric_logger.update(peak_train_memory_mb=torch.cuda.max_memory_allocated(device) / 1024**2)
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    return {key: meter.global_avg for key, meter in metric_logger.meters.items()}
+
+
+def _distributed_concat(tensor: torch.Tensor) -> torch.Tensor:
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return tensor
+    gathered = [None for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather_object(gathered, tensor.cpu())
+    return torch.cat(gathered, dim=0)
+
+
+def _binary_average_precision(scores: torch.Tensor, targets: torch.Tensor) -> float:
+    positives = float(targets.sum().item())
+    if positives <= 0:
+        return float("nan")
+    order = torch.argsort(scores, descending=True)
+    sorted_targets = targets[order].float()
+    precision = sorted_targets.cumsum(0) / torch.arange(1, len(sorted_targets) + 1, dtype=torch.float32)
+    return float((precision * sorted_targets).sum().item() / positives)
+
+
+def _multilabel_metrics(logits: torch.Tensor, targets: torch.Tensor):
+    probabilities = logits.sigmoid()
+    predictions = probabilities >= 0.5
+    truth = targets >= 0.5
+    tp = (predictions & truth).sum().float()
+    fp = (predictions & ~truth).sum().float()
+    fn = (~predictions & truth).sum().float()
+    micro_f1 = (2 * tp / (2 * tp + fp + fn).clamp_min(1)).item() * 100.0
+    aps = [_binary_average_precision(probabilities[:, c], truth[:, c]) for c in range(probabilities.shape[1])]
+    valid = [value for value in aps if not math.isnan(value)]
+    return {"map": 100.0 * sum(valid) / max(1, len(valid)), "micro_f1": micro_f1}
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, use_amp: bool = False, measure_latency: bool = False):
-    criterion = torch.nn.CrossEntropyLoss()
+def evaluate(
+    data_loader,
+    model,
+    device,
+    use_amp: bool = False,
+    measure_latency: bool = False,
+    task_type: str = TASK_SINGLE_LABEL,
+    criterion: Optional[torch.nn.Module] = None,
+):
+    if criterion is None:
+        criterion = {
+            TASK_SINGLE_LABEL: torch.nn.CrossEntropyLoss(),
+            TASK_MULTILABEL: torch.nn.BCEWithLogitsLoss(),
+            TASK_REGRESSION: torch.nn.MSELoss(),
+        }[task_type]
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = "Test:"
-
     model.eval()
+
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
 
-    n_images = 0
-    elapsed_forward = 0.0
-
+    outputs, targets_all = [], []
+    n_images, elapsed_forward = 0, 0.0
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0].to(device, non_blocking=True)
-        target = batch[-1].to(device, non_blocking=True)
-
+        target = _prepare_target(batch[1].to(device, non_blocking=True), task_type)
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
         start = time.time()
         with _amp_context(device, use_amp):
-            output = model(images)
+            output = _extract_output(model(images))
             loss = criterion(output, target)
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize(device)
         elapsed_forward += time.time() - start
-
-        num_classes = output.shape[-1]
         batch_size = images.shape[0]
-        if num_classes >= 5:
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-        else:
-            acc1 = accuracy(output, target, topk=(1,))[0]
+        metric_logger.meters["loss"].update(float(loss.item()), n=batch_size)
 
-        metric_logger.update(loss=loss.item())
-        metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
+        if task_type == TASK_SINGLE_LABEL:
+            topk = (1, 5) if output.shape[-1] >= 5 else (1,)
+            values = accuracy(output, target, topk=topk)
+            metric_logger.meters["acc1"].update(float(values[0].item()), n=batch_size)
+            if len(values) > 1:
+                metric_logger.meters["acc5"].update(float(values[1].item()), n=batch_size)
+        else:
+            outputs.append(output.detach().cpu())
+            targets_all.append(target.detach().cpu())
         n_images += batch_size
 
-    if device.type == "cuda" and torch.cuda.is_available():
-        torch.cuda.synchronize(device)
+    if task_type != TASK_SINGLE_LABEL and outputs:
+        prediction_tensor = _distributed_concat(torch.cat(outputs, dim=0))
+        target_tensor = _distributed_concat(torch.cat(targets_all, dim=0))
+        if task_type == TASK_MULTILABEL:
+            for key, value in _multilabel_metrics(prediction_tensor, target_tensor).items():
+                metric_logger.update(**{key: value})
+        else:
+            error = prediction_tensor - target_tensor
+            metric_logger.update(mae=float(error.abs().mean().item()))
+            metric_logger.update(rmse=float(error.square().mean().sqrt().item()))
 
     if measure_latency and n_images > 0:
         metric_logger.update(latency_ms_per_image=1000.0 * elapsed_forward / n_images)
         metric_logger.update(fps=n_images / max(elapsed_forward, 1e-12))
-
     if device.type == "cuda" and torch.cuda.is_available():
-        peak_inference_memory_mb = torch.cuda.max_memory_allocated(device) / 1024**2
-        metric_logger.update(peak_inference_memory_mb=peak_inference_memory_mb)
+        metric_logger.update(peak_inference_memory_mb=torch.cuda.max_memory_allocated(device) / 1024**2)
 
     metric_logger.synchronize_between_processes()
-    if "acc5" in metric_logger.meters:
-        print(
-            "* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}".format(
-                top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss
-            )
-        )
+    stats = {key: meter.global_avg for key, meter in metric_logger.meters.items()}
+    if task_type == TASK_SINGLE_LABEL:
+        print(f"* Acc@1 {stats.get('acc1', 0):.3f} loss {stats.get('loss', 0):.3f}")
+    elif task_type == TASK_MULTILABEL:
+        print(f"* mAP {stats.get('map', 0):.3f} micro-F1 {stats.get('micro_f1', 0):.3f} loss {stats.get('loss', 0):.3f}")
     else:
-        print(
-            "* Acc@1 {top1.global_avg:.3f} loss {losses.global_avg:.3f}".format(
-                top1=metric_logger.acc1, losses=metric_logger.loss
-            )
-        )
-
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+        print(f"* MAE {stats.get('mae', 0):.5f} RMSE {stats.get('rmse', 0):.5f} loss {stats.get('loss', 0):.5f}")
+    return stats

@@ -1,155 +1,162 @@
-#\models\tuning_modules\conv_adapter 
+"""Conv-Adapter reproduction for ResNet-50 bottleneck blocks.
 
-from sqlite3 import adapters
-from typing import Callable, List, Optional
+Implements the published depthwise-then-pointwise adapter with a learnable
+output-channel scaling vector and the four insertion schemes studied in the
+paper: convolution parallel/sequential and residual parallel/sequential.
+"""
+from __future__ import annotations
+
+from typing import Iterable, Iterator
+
 import torch
-from torch import Tensor
 import torch.nn as nn
 
-class SqueezeExcitation(torch.nn.Module):
-    """
-    This block implements the Squeeze-and-Excitation block from https://arxiv.org/abs/1709.01507 (see Fig. 1).
-    Parameters ``activation``, and ``scale_activation`` correspond to ``delta`` and ``sigma`` in eq. 3.
-    Args:
-        input_channels (int): Number of channels in the input image
-        squeeze_channels (int): Number of squeeze channels
-        activation (Callable[..., torch.nn.Module], optional): ``delta`` activation. Default: ``torch.nn.ReLU``
-        scale_activation (Callable[..., torch.nn.Module]): ``sigma`` activation. Default: ``torch.nn.Sigmoid``
+
+class ConvAdapter(nn.Module):
+    """Published Conv-Adapter module.
+
+    A depthwise KxK convolution preserves locality, followed by nonlinearity,
+    pointwise channel projection, and channel-wise learnable scaling initialized
+    to one.
     """
 
     def __init__(
         self,
-        input_channels: int,
-        squeeze_channels: int,
-        out_channels: int,
-        activation: Callable[..., torch.nn.Module] = torch.nn.ReLU,
-        scale_activation: Callable[..., torch.nn.Module] = torch.nn.Sigmoid,
+        inplanes: int,
+        outplanes: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        dilation: int = 1,
+        act_layer=nn.GELU,
     ) -> None:
         super().__init__()
-        # _log_api_usage_once(self)
-        self.avgpool = torch.nn.AdaptiveAvgPool2d(1)
-        self.fc1 = torch.nn.Conv2d(input_channels, squeeze_channels, 1)
-        self.fc2 = torch.nn.Conv2d(squeeze_channels, out_channels, 1)
-        self.activation = activation()
-        self.scale_activation = scale_activation()
+        padding = ((int(kernel_size) - 1) // 2) * int(dilation)
+        self.depthwise = nn.Conv2d(
+            int(inplanes),
+            int(inplanes),
+            kernel_size=int(kernel_size),
+            stride=int(stride),
+            padding=padding,
+            dilation=int(dilation),
+            groups=int(inplanes),
+            bias=True,
+        )
+        self.activation = act_layer()
+        self.pointwise = nn.Conv2d(int(inplanes), int(outplanes), kernel_size=1, bias=True)
+        self.scale = nn.Parameter(torch.ones(1, int(outplanes), 1, 1))
+        self.is_conv_adapter = True
 
-    def _scale(self, input: Tensor) -> Tensor:
-        scale = self.avgpool(input)
-        scale = self.fc1(scale)
-        scale = self.activation(scale)
-        scale = self.fc2(scale)
-        return self.scale_activation(scale)
-
-    def forward(self, input: Tensor) -> Tensor:
-        scale = self._scale(input)
-        # return scale * input
-        return scale
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.pointwise(self.activation(self.depthwise(x))) * self.scale
 
 
-class ConvAdapterDesign1(nn.Module):
-    """
-    Design 1
-    """
-    def __init__(self, inplanes, outplanes, width, 
-                kernel_size=3, padding=1, stride=1, groups=1, dilation=1, norm_layer=None, act_layer=None, adapt_scale=1.0):
+class ConvAdapterBottleneck(nn.Module):
+    """Wrap one frozen ResNet-50 Bottleneck with a published insertion scheme."""
+
+    MODES = {"conv_parallel", "conv_sequential", "residual_parallel", "residual_sequential"}
+
+    def __init__(self, block: nn.Module, mode: str, kernel_size: int = 3) -> None:
         super().__init__()
-        if norm_layer is None:
-            norm_layer = nn.Identity
-        if act_layer is None:
-            act_layer = nn.Identity
+        if not all(hasattr(block, name) for name in ("conv1", "bn1", "conv2", "bn2", "conv3", "bn3", "relu")):
+            raise TypeError("Conv-Adapter paper reproduction requires ResNet Bottleneck blocks")
+        mode = str(mode).lower()
+        if mode not in self.MODES:
+            raise ValueError(f"Unknown Conv-Adapter mode: {mode}")
+        self.block = block
+        self.mode = mode
+        for parameter in self.block.parameters():
+            parameter.requires_grad_(False)
 
-        # point-wise conv
-        self.conv1 = nn.Conv2d(inplanes, width, kernel_size=1, stride=1)
-        self.norm1 = norm_layer(width)
+        if mode.startswith("conv_"):
+            self.adapter = ConvAdapter(
+                block.conv2.in_channels,
+                block.conv2.out_channels,
+                kernel_size=kernel_size,
+                stride=block.conv2.stride[0] if isinstance(block.conv2.stride, tuple) else block.conv2.stride,
+                dilation=block.conv2.dilation[0] if isinstance(block.conv2.dilation, tuple) else block.conv2.dilation,
+            )
+        elif mode == "residual_parallel":
+            self.adapter = ConvAdapter(
+                block.conv1.in_channels,
+                block.conv3.out_channels,
+                kernel_size=kernel_size,
+                stride=block.conv2.stride[0] if isinstance(block.conv2.stride, tuple) else block.conv2.stride,
+            )
+        else:
+            self.adapter = ConvAdapter(
+                block.conv3.out_channels,
+                block.conv3.out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+            )
+        self.is_conv_adapter_wrapper = True
 
-        # depth-wise conv
-        self.conv2 = nn.Conv2d(width, width, kernel_size=kernel_size, stride=stride, groups=groups, padding=padding, dilation=int(dilation))
-        self.norm2 = norm_layer(width)
-
-        # poise-wise conv
-        self.conv3 = nn.Conv2d(width, outplanes, kernel_size=1, stride=1)
-        self.norm3 = norm_layer(outplanes)
-
-        self.act = act_layer()
-
-        self.adapt_scale = adapt_scale
-    
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.norm1(out)
-        out = self.act(out)
-        
-        out = self.conv2(out)
-        out = self.norm2(out)
-
-        out = self.conv3(out)
-        out = self.norm3(out)
-        out = self.act(out)
-
-        return out * self.adapt_scale
-
-class ConvAdapter(nn.Module):
-    """
-    Design 2 v4
-    """
-    def __init__(self, inplanes, outplanes, width, 
-                kernel_size=3, padding=1, stride=1, groups=1, dilation=1, norm_layer=None, act_layer=None, **kwargs):
-        super().__init__()
-        if norm_layer is None:
-            norm_layer = nn.Identity
-        if act_layer is None:
-            act_layer = nn.Identity
-
-        # self.act = nn.SiLU()
-
-        # depth-wise conv
-        self.conv1 = nn.Conv2d(inplanes, width, kernel_size=kernel_size, stride=stride, groups=groups, padding=padding, dilation=int(dilation))
-        # self.norm = norm_layer(width)
-        self.act = act_layer()
-
-        # poise-wise conv
-        self.conv2 = nn.Conv2d(width, outplanes, kernel_size=1, stride=1)
-
-        # se 
-        # self.se = SqueezeExcitation(inplanes, width, outplanes, activation=act_layer)
-        self.se = nn.Parameter(1.0 * torch.ones((1, outplanes, 1, 1)), requires_grad=True)
-        # self.se = 4.0
-
-    
-    def forward(self, x):
-        out = self.conv1(x)
-        # out = self.norm(out)
-        out = self.act(out)
-        out = self.conv2(out)
-        out = out * self.se
-        # TODO: add norm layer
-
+    def _frozen_residual_branch(self, x: torch.Tensor):
+        b = self.block
+        out = b.relu(b.bn1(b.conv1(x)))
+        conv2_input = out
+        conv2_output = b.conv2(conv2_input)
+        if self.mode == "conv_parallel":
+            conv2_output = conv2_output + self.adapter(conv2_input)
+        elif self.mode == "conv_sequential":
+            conv2_output = conv2_output + self.adapter(conv2_output)
+        out = b.relu(b.bn2(conv2_output))
+        out = b.bn3(b.conv3(out))
         return out
-    
 
-
-class LinearAdapter(nn.Module):
-    """
-    Design 2 v4
-    """
-    def __init__(self, inplanes, outplanes, width, act_layer=None, **kwargs):
-        super().__init__()
-
-        self.fc1 = nn.Linear(inplanes, width)
-        self.fc2 = nn.Linear(width, outplanes)
-        self.act = act_layer()
-        self.se = nn.Parameter(1.0 * torch.ones((1, outplanes)), requires_grad=True)
-
-    def forward(self, x):
-        out = self.fc1(x)
-        # out = self.norm(out)
-        out = self.act(out)
-        out = self.fc2(out)
-        out = out * self.se
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        residual = self._frozen_residual_branch(x)
+        if self.mode == "residual_parallel":
+            residual = residual + self.adapter(x)
+        if self.block.downsample is not None:
+            identity = self.block.downsample(x)
+        out = self.block.relu(residual + identity)
+        if self.mode == "residual_sequential":
+            out = out + self.adapter(out)
         return out
 
 
-if __name__ == '__main__':
-    adapter = ConvAdapter(128, 128, width=32, groups=32)
-    print(adapter.conv1.weight.shape)
-    print(adapter.conv2.weight.shape)
+def apply_conv_adapter_resnet50(
+    model: nn.Module,
+    mode: str = "conv_parallel",
+    kernel_size: int = 3,
+    stages: Iterable[int] = (1, 2, 3, 4),
+) -> int:
+    """Insert Conv-Adapter into every Bottleneck of selected ResNet-50 stages."""
+    count = 0
+    for stage in stages:
+        layer = getattr(model, f"layer{int(stage)}", None)
+        if not isinstance(layer, nn.Sequential):
+            raise TypeError("Conv-Adapter strict reproduction requires standard ResNet stages")
+        for index, block in enumerate(layer):
+            if isinstance(block, ConvAdapterBottleneck):
+                continue
+            layer[index] = ConvAdapterBottleneck(block, mode=mode, kernel_size=kernel_size)
+            count += 1
+    if count == 0:
+        raise RuntimeError("No ResNet Bottleneck was adapted")
+    return count
+
+
+def set_conv_adapter_trainability(model: nn.Module) -> None:
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for module in model.modules():
+        if isinstance(module, ConvAdapter):
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
+    for name, parameter in model.named_parameters():
+        if name.startswith("fc.") or ".fc." in name:
+            parameter.requires_grad_(True)
+
+
+# Legacy classes retained as aliases to avoid broken imports.
+ConvAdapterDesign1 = ConvAdapter
+LinearAdapter = nn.Identity
+
+
+__all__ = [
+    "ConvAdapter", "ConvAdapterBottleneck", "apply_conv_adapter_resnet50",
+    "set_conv_adapter_trainability", "ConvAdapterDesign1", "LinearAdapter",
+]

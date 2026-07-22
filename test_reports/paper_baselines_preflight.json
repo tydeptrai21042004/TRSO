@@ -1,0 +1,62 @@
+{
+  "baselines": {
+    "visual_prompt": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "conv_adapter": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "bam": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "residual_adapter": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "ssf": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "lora": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "bitfit": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "side_tuning": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    }
+  },
+  "all_ok": true,
+  "failures": []
+}

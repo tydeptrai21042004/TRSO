@@ -1,0 +1,7 @@
+# Optional dataset/model integrations
+pycocotools>=2.0.7
+open_clip_torch>=2.24
+
+# Optional experiment logging
+wandb>=0.16
+tensorboard>=2.15

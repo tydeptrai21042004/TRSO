@@ -6,7 +6,7 @@
   "disabled_returns_same_tensor": true,
   "fused_max_error": 1.1175870895385742e-08,
   "maximum_channel_kernel_l1": 0.07112492620944977,
-  "coefficient_gradient_l1": 0.0035318545267273294,
+  "coefficient_gradient_l1": 0.0035318540406024113,
   "calibration_tangent_cosine": 1.0,
   "recovered_kernel_cosine": 1.0,
   "recovered_channel_spatial_rank": 2,

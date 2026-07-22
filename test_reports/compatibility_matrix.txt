@@ -1,0 +1,12 @@
+full         | clip_cnn,clip_transformer,cnn,mlp,resnet,swin,transformer,vit | Any supported classifier/regressor.
+linear       | clip_cnn,clip_transformer,cnn,mlp,resnet,swin,transformer,vit | Any backbone with a replaceable task head.
+prompt       | cnn,resnet,swin,transformer,vit               | Single-label classification with an unchanged pretrained output head and fixed label mapping.
+conv         | resnet                                        | ResNet-50 only; four paper insertion schemes are available.
+adapter      | resnet                                        | ResNet-50 only; do not report conv and adapter as separate rows.
+trso         | cnn,resnet,swin,transformer,vit               | Recognized torchvision/timm CNN, ViT, and Swin blocks.
+bam          | resnet                                        | ResNet-50 only, inserted at the three published stage transitions.
+residual     | resnet                                        | Dedicated ResNet-26 series/parallel model; arbitrary torchvision ResNets are rejected.
+ssf          | cnn,swin,vit                                  | torchvision ConvNeXt, VisionTransformer, and SwinTransformer only.
+lora         | swin,transformer,vit                          | Recognized Transformer Q/V or packed QKV attention projections.
+bitfit       | clip_transformer,swin,transformer,vit         | Transformer biases plus task head.
+sidetune     | resnet                                        | ResNet only; side is initialized from the pretrained base.

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+import random
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -27,19 +28,31 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-from timm.data.mixup import Mixup
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
-from timm.utils import ModelEma
+try:
+    from timm.data.mixup import Mixup
+    from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+    from timm.utils import ModelEma
+except Exception:
+    from compat.timm_compat import Mixup, LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, ModelEma
 
 from datasets import build_dataset
 try:
-    from datasets.build import build_dataset_split
-except Exception:  # backward fallback if user did not replace datasets/build.py yet
+    from datasets.build import (
+        TASK_MULTILABEL, TASK_REGRESSION, TASK_SINGLE_LABEL,
+        available_datasets, build_dataset_split,
+    )
+except Exception:  # backward fallback
     build_dataset_split = None
+    TASK_SINGLE_LABEL, TASK_MULTILABEL, TASK_REGRESSION = "single_label", "multilabel", "regression"
+    available_datasets = lambda: []
 
 from engine import evaluate, train_one_epoch
 from memory_utils import profile_memory_cost
 from models import build_model
+from models.model_support import (
+    canonical_method, compatibility_rows, detect_backbone_family,
+    validate_method_backbone,
+)
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
 
@@ -61,14 +74,17 @@ def get_args_parser():
 
     # Backbone
     parser.add_argument("--backbone", type=str, default="resnet50")
+    parser.add_argument("--model_source", type=str, default="auto", choices=["auto", "torchvision", "timm", "hub"])
     parser.add_argument("--weights", type=str, default="DEFAULT")
     parser.add_argument("--list_backbones", action="store_true")
+    parser.add_argument("--list_compatibility", action="store_true")
+    parser.add_argument("--legacy_auto_hparams", type=str2bool, default=False, help="Opt into the original repository hyperparameter override table.")
     parser.add_argument("--pretrained", type=str2bool, default=None)
     parser.add_argument("--keep_pretrained_head", type=str2bool, default=True)
     parser.add_argument("--cifar_hub", type=str, default="auto", choices=["auto", "chenyaofo", "akamaster"])
 
     # CLIP linear probe branch
-    parser.add_argument("--clip_model", type=str, default=None, choices=["RN50", "RN50x4"])
+    parser.add_argument("--clip_model", type=str, default=None, help="OpenAI CLIP/OpenCLIP visual backbone name, e.g. RN50 or ViT-B/16.")
     parser.add_argument("--clip_pretrained", type=str, default="openai")
     parser.add_argument("--freeze_backbone", type=str2bool, default=True)
 
@@ -79,7 +95,7 @@ def get_args_parser():
         default="trso",
         help=(
             "full | linear | prompt | conv | adapter | trso | bam | residual | "
-            "ssf | lora_conv | bitfit | sidetune"
+            "ssf | lora | bitfit | sidetune"
         ),
     )
 
@@ -90,10 +106,12 @@ def get_args_parser():
     parser.add_argument("--sidetune_depth", type=int, default=3)
 
     # Prompt / Conv-Adapter
-    parser.add_argument("--prompt_size", default=10, type=int)
+    parser.add_argument("--prompt_size", default=30, type=int)
+    parser.add_argument("--prompt_output_indices", default="", type=str, help="Comma-separated fixed pretrained output indices; empty uses 0..C-1.")
     parser.add_argument("--kernel_size", default=3, type=int)
     parser.add_argument("--adapt_size", default=8, type=float)
     parser.add_argument("--adapt_scale", default=1.0, type=float)
+    parser.add_argument("--conv_adapter_mode", default="conv_parallel", choices=["conv_parallel", "conv_sequential", "residual_parallel", "residual_sequential"])
 
     # Task-Response Spatial Operator (TRSO)
     parser.add_argument("--trso_kernel_size", type=int, default=5, help="Odd support of each depthwise spatial atom.")
@@ -123,17 +141,21 @@ def get_args_parser():
 
     # Residual Adapter
     parser.add_argument("--ra_mode", type=str, default="parallel", choices=["parallel", "series"])
-    parser.add_argument("--ra_reduction", type=int, default=16)
-    parser.add_argument("--ra_norm", type=str, default="bn", choices=["bn", "ln", "none"])
-    parser.add_argument("--ra_act", type=str, default="relu", choices=["relu", "gelu", "silu", "none"])
-    parser.add_argument("--ra_gate_init", type=float, default=0.0)
+    parser.add_argument("--ra_reduction", type=int, default=1, help="Legacy compatibility option; paper-style residual adapters use full-width 1x1 mappings.")
+    parser.add_argument("--ra_norm", type=str, default="bn", choices=["bn", "ln", "none"], help="Legacy compatibility option retained for old command lines.")
+    parser.add_argument("--ra_act", type=str, default="none", choices=["relu", "gelu", "silu", "none"], help="Legacy compatibility option retained for old command lines.")
+    parser.add_argument("--ra_gate_init", type=float, default=0.0, help="Legacy compatibility option; paper-style adapters are identity-safe through zero-initialized 1x1 weights.")
     parser.add_argument("--ra_stages", type=str, default="1,2,3,4")
+    parser.add_argument("--ra_pretrained_checkpoint", type=str, default="", help="Official/shared ResNet-26 checkpoint for residual-adapter transfer.")
 
     # SSF / LoRA / BitFit
     parser.add_argument("--ssf_init_scale", type=float, default=1.0)
     parser.add_argument("--ssf_init_shift", type=float, default=0.0)
+    parser.add_argument("--ssf_init_std", type=float, default=0.02)
     parser.add_argument("--lora_r", type=int, default=8)
     parser.add_argument("--lora_alpha", type=float, default=16.0)
+    parser.add_argument("--lora_dropout", type=float, default=0.0)
+    parser.add_argument("--lora_merge_weights", type=str2bool, default=True)
     parser.add_argument("--lora_target", type=str, default="all", choices=["all", "1x1", "3x3", "dw"])
     parser.add_argument("--bitfit_train_head", type=str2bool, default=True)
 
@@ -156,6 +178,9 @@ def get_args_parser():
     parser.add_argument("--model_ema_eval", type=str2bool, default=False)
 
     # Optimization
+    parser.add_argument("--optimizer", default="auto", choices=["auto", "adamw", "sgd"])
+    parser.add_argument("--momentum", default=0.9, type=float)
+    parser.add_argument("--paper_hparams", type=str2bool, default=False, help="Apply the original paper default optimizer schedule where a single canonical setting exists.")
     parser.add_argument("--opt_eps", default=1e-8, type=float)
     parser.add_argument("--clip_grad", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -170,6 +195,7 @@ def get_args_parser():
     parser.add_argument("--color_jitter", type=float, default=0.0)
     parser.add_argument("--aa", type=str, default="rand-m9-mstd0.5-inc1")
     parser.add_argument("--smoothing", type=float, default=0.0)
+    parser.add_argument("--regression_loss", type=str, default="mse", choices=["mse", "smooth_l1"])
     parser.add_argument("--train_interpolation", type=str, default="bicubic")
     parser.add_argument("--crop_pct", type=float, default=None)
     parser.add_argument("--reprob", type=float, default=0.0)
@@ -197,6 +223,21 @@ def get_args_parser():
     # Dataset
     parser.add_argument("--is_tuning", default=False, type=str2bool)
     parser.add_argument("--dataset", default="dtd", type=str)
+    parser.add_argument("--task", default="auto", choices=["auto", "single_label", "multilabel", "regression"])
+    parser.add_argument("--download", type=str2bool, default=False)
+    parser.add_argument("--allow_val_as_test", type=str2bool, default=False)
+    parser.add_argument("--val_ratio", default=0.1, type=float)
+    parser.add_argument("--dtd_partition", default=1, type=int)
+    parser.add_argument("--places_small", type=str2bool, default=True)
+    parser.add_argument("--inat_target_type", default="full", type=str)
+    parser.add_argument("--coco_task", default="multilabel", choices=["multilabel", "majority"])
+    parser.add_argument("--celeba_task", default="attributes", choices=["attributes", "landmarks"], help="CelebA attributes is multi-label; landmarks is 10-output regression.")
+    parser.add_argument("--train_csv", default="", type=str)
+    parser.add_argument("--val_csv", default="", type=str)
+    parser.add_argument("--test_csv", default="", type=str)
+    parser.add_argument("--image_column", default="image", type=str)
+    parser.add_argument("--label_column", default="label", type=str)
+    parser.add_argument("--label_separator", default=";", type=str)
     parser.add_argument("--data_path", default="./data", type=str)
     parser.add_argument("--eval_data_path", default=None, type=str)
     parser.add_argument("--nb_classes", default=1000, type=int)
@@ -208,6 +249,7 @@ def get_args_parser():
     parser.add_argument("--log_dir", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--deterministic", type=str2bool, default=False, help="Use deterministic PyTorch algorithms when available.")
 
     parser.add_argument("--resume", default="")
     parser.add_argument("--auto_resume", type=str2bool, default=False)
@@ -244,35 +286,30 @@ def get_args_parser():
 
 
 def canonicalize_args(args):
-    aliases = {
-        "task_response": "trso",
-        "task-response": "trso",
-        "task_response_spatial_operator": "trso",
-        "trso_adapter": "trso",
-        "bam_adapter": "bam",
-        "bam-tuning": "bam",
-        "bam_tuning": "bam",
-        "lora": "lora_conv",
-        "lora_conv2d": "lora_conv",
-        "ssf_adapter": "ssf",
-        "ra": "residual",
-        "residual_adapter": "residual",
-        "side-tuning": "sidetune",
-        "sidetuning": "sidetune",
-        "side_tune": "sidetune",
-        "full_finetune": "full",
-        "finetune_full": "full",
-        "linear_probe": "linear",
-    }
-    args.tuning_method = aliases.get(str(args.tuning_method).lower(), str(args.tuning_method).lower())
+    args.tuning_method = canonical_method(args.tuning_method)
 
     if args.tuning_method == "full":
         args.freeze_backbone = False
-    elif args.tuning_method in (
-        "linear", "conv", "adapter", "trso", "bam", "residual", "ssf",
-        "lora_conv", "bitfit", "sidetune",
-    ):
+    else:
         args.freeze_backbone = True
+
+    if args.optimizer == "auto":
+        args.optimizer = "sgd" if args.tuning_method in {"prompt", "bam", "residual", "sidetune"} else "adamw"
+    if args.paper_hparams:
+        if args.tuning_method == "prompt":
+            args.optimizer = "sgd"
+            args.lr = 40.0
+            args.weight_decay = 0.0
+            args.weight_decay_adapter = 0.0
+            args.epochs = 1000
+            args.warmup_steps = 1000
+            args.prompt_size = 30
+        elif args.tuning_method == "bam":
+            args.optimizer = "sgd"
+            args.lr = 0.1
+            args.momentum = 0.9
+            args.weight_decay = 1e-4
+            args.epochs = 100
 
     if args.trso_kernel_size <= 0 or args.trso_kernel_size % 2 == 0:
         raise ValueError("--trso_kernel_size must be a positive odd integer.")
@@ -284,6 +321,13 @@ def canonicalize_args(args):
         raise ValueError("--trso_keep_ratio must be in (0, 1].")
     if args.trso_parameter_budget < 0:
         raise ValueError("--trso_parameter_budget cannot be negative.")
+    if not (0.0 < float(args.val_ratio) < 1.0):
+        raise ValueError("--val_ratio must be in (0, 1).")
+    if args.task in {"multilabel", "regression"} and (args.mixup > 0 or args.cutmix > 0 or args.cutmix_minmax is not None):
+        raise ValueError("Mixup/CutMix is currently supported only for single-label classification.")
+    paper_classification_only = {"prompt", "conv", "adapter", "bam", "residual", "ssf", "lora", "bitfit", "sidetune"}
+    if args.tuning_method in paper_classification_only and args.task not in {"auto", "classification", "single_label"}:
+        raise ValueError(f"Strict paper baseline '{args.tuning_method}' supports single-label classification only.")
     return args
 
 
@@ -340,12 +384,25 @@ def _infer_clip_input_size(preprocess):
     return size or 224
 
 
+def _strip_wrapper_prefixes(name: str) -> str:
+    prefixes = ("module.", "backbone.", "visual.")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                changed = True
+    return name
+
+
 def _is_head_key(k: str) -> bool:
-    return k.startswith(("head.", "fc.", "classifier.", "linear."))
+    name = _strip_wrapper_prefixes(k)
+    return name.startswith(("head.", "heads.", "fc.", "classifier.", "linear."))
 
 
 def _is_head_param(name: str) -> bool:
-    return name.startswith(("head.", "fc.", "classifier.", "linear."))
+    return _is_head_key(name)
 
 
 def _extract_checkpoint_model(ckpt: dict, model_key: str):
@@ -387,41 +444,87 @@ class CLIPLinearProbe(nn.Module):
         return self.head(feats)
 
 
-def _replace_classifier_head(model_backbone: nn.Module, num_classes: int, keep_pretrained_head: bool = True):
-    def maybe_replace_linear(parent, name, lin):
-        if not isinstance(lin, nn.Linear):
-            return False
-        if keep_pretrained_head and lin.out_features == num_classes:
-            return False
-        setattr(parent, name, nn.Linear(lin.in_features, num_classes))
-        return True
+class PixelPromptWrapper(nn.Module):
+    """Apply the repository's original border prompt before any image backbone."""
 
-    replaced = False
-    if hasattr(model_backbone, "fc") and isinstance(model_backbone.fc, nn.Linear):
-        replaced = maybe_replace_linear(model_backbone, "fc", model_backbone.fc)
-    elif hasattr(model_backbone, "classifier"):
-        head = model_backbone.classifier
-        if isinstance(head, nn.Linear):
-            replaced = maybe_replace_linear(model_backbone, "classifier", head)
-        elif isinstance(head, nn.Sequential):
-            new_seq = list(head)
-            for i in reversed(range(len(new_seq))):
-                if isinstance(new_seq[i], nn.Linear):
-                    if not (keep_pretrained_head and new_seq[i].out_features == num_classes):
-                        new_seq[i] = nn.Linear(new_seq[i].in_features, num_classes)
-                        model_backbone.classifier = nn.Sequential(*new_seq)
-                        replaced = True
-                    break
-    if not replaced and hasattr(model_backbone, "linear") and isinstance(model_backbone.linear, nn.Linear):
-        replaced = maybe_replace_linear(model_backbone, "linear", model_backbone.linear)
-    if not replaced and hasattr(model_backbone, "head") and isinstance(model_backbone.head, nn.Linear):
-        replaced = maybe_replace_linear(model_backbone, "head", model_backbone.head)
-    return replaced
+    def __init__(self, backbone: nn.Module, prompt_size: int, image_size: int):
+        super().__init__()
+        from models.tuning_modules.prompter import PadPrompter
+        self.tuning_module = PadPrompter(prompt_size=prompt_size, image_size=image_size)
+        self.backbone = backbone
+        self.backbone_family = getattr(backbone, "backbone_family", None)
+
+    def forward(self, x):
+        return self.backbone(self.tuning_module(x))
+
+
+def _replace_classifier_head(model_backbone: nn.Module, num_classes: int, keep_pretrained_head: bool = True):
+    """Replace a classification head across torchvision, timm, and local models.
+
+    Returns True when a compatible head is found, including when its output
+    dimension already matches. A missing head is an error at the call site.
+    """
+    num_classes = int(num_classes)
+
+    if hasattr(model_backbone, "reset_classifier") and callable(model_backbone.reset_classifier):
+        try:
+            current = model_backbone.get_classifier() if hasattr(model_backbone, "get_classifier") else None
+            if not (keep_pretrained_head and isinstance(current, nn.Linear) and current.out_features == num_classes):
+                model_backbone.reset_classifier(num_classes)
+            return True
+        except Exception:
+            pass
+
+    def replace_attr(parent, name) -> bool:
+        layer = getattr(parent, name, None)
+        if isinstance(layer, nn.Linear):
+            if not (keep_pretrained_head and layer.out_features == num_classes):
+                setattr(parent, name, nn.Linear(layer.in_features, num_classes, bias=layer.bias is not None))
+            return True
+        if isinstance(layer, nn.Conv2d):
+            if not (keep_pretrained_head and layer.out_channels == num_classes):
+                setattr(parent, name, nn.Conv2d(layer.in_channels, num_classes, layer.kernel_size, layer.stride, layer.padding, bias=layer.bias is not None))
+            return True
+        if isinstance(layer, nn.Sequential):
+            items = list(layer)
+            for index in reversed(range(len(items))):
+                child = items[index]
+                if isinstance(child, nn.Linear):
+                    if not (keep_pretrained_head and child.out_features == num_classes):
+                        items[index] = nn.Linear(child.in_features, num_classes, bias=child.bias is not None)
+                        setattr(parent, name, nn.Sequential(*items))
+                    return True
+                if isinstance(child, nn.Conv2d):
+                    if not (keep_pretrained_head and child.out_channels == num_classes):
+                        items[index] = nn.Conv2d(child.in_channels, num_classes, child.kernel_size, child.stride, child.padding, bias=child.bias is not None)
+                        setattr(parent, name, nn.Sequential(*items))
+                    return True
+        return False
+
+    for attribute in ("fc", "classifier", "linear", "head"):
+        if replace_attr(model_backbone, attribute):
+            return True
+
+    # Torchvision VisionTransformer stores the classifier at heads.head.
+    heads = getattr(model_backbone, "heads", None)
+    if heads is not None:
+        if replace_attr(heads, "head"):
+            return True
+        if isinstance(heads, nn.Sequential):
+            items = list(heads)
+            for index in reversed(range(len(items))):
+                if isinstance(items[index], nn.Linear):
+                    child = items[index]
+                    if not (keep_pretrained_head and child.out_features == num_classes):
+                        items[index] = nn.Linear(child.in_features, num_classes, bias=child.bias is not None)
+                        model_backbone.heads = nn.Sequential(*items)
+                    return True
+    return False
 
 
 def _freeze_batchnorm(model: nn.Module):
     for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):
+        if isinstance(m, nn.modules.batchnorm._BatchNorm):
             m.eval()
             if m.affine:
                 if m.weight is not None:
@@ -430,52 +533,115 @@ def _freeze_batchnorm(model: nn.Module):
                     m.bias.requires_grad = False
 
 
-def _build_torchvision_or_hub_backbone(args):
+
+
+def _torchvision_classification_backbones():
+    """Return torchvision image-classification builders only."""
     import torchvision
+    blocked_modules = (".detection.", ".segmentation.", ".video.", ".optical_flow.", ".quantization.")
+    names = []
+    try:
+        from torchvision.models import get_model_builder
+        for name in torchvision.models.list_models():
+            try:
+                module_name = get_model_builder(name).__module__
+            except Exception:
+                continue
+            if not any(token in module_name for token in blocked_modules):
+                names.append(name)
+    except Exception:
+        names = [name for name in torchvision.models.list_models() if not name.startswith("video")]
+    return sorted(set(names))
+
+def _build_torchvision_or_hub_backbone(args):
+    """Build from torchvision, timm, or supported CIFAR hubs."""
+    import torchvision
+
     if args.pretrained is None:
         pretrained_flag = args.weights is not None and str(args.weights).lower() not in ("none", "scratch", "random")
     else:
         pretrained_flag = bool(args.pretrained)
 
-    tv_weights, has_new_api = _resolve_weights_multiapi(args.backbone, args.weights)
-    print(f"[Info] Backbone={args.backbone} | tv_weights={args.weights} -> {tv_weights} | hub.pretrained={pretrained_flag}")
+    source = str(getattr(args, "model_source", "auto")).lower()
+    hub_pattern = re.match(r"^cifar(10|100)_.+$", args.backbone) or args.backbone in (
+        "cifar_resnet56", "resnet56_cifar", "akamaster_resnet56", "resnet56_cifar10"
+    ) or re.match(r"^akamaster_resnet(20|32|44|56|110)$", args.backbone)
 
-    model_backbone = None
-    if re.match(r"^cifar(10|100)_.+$", args.backbone) and args.cifar_hub in ("auto", "chenyaofo"):
-        provider = "chenyaofo/pytorch-cifar-models"
-        model_backbone = torch.hub.load(provider, args.backbone, pretrained=pretrained_flag)
+    if source in ("auto", "hub") and hub_pattern:
+        if re.match(r"^cifar(10|100)_.+$", args.backbone) and args.cifar_hub in ("auto", "chenyaofo"):
+            provider, entry = "chenyaofo/pytorch-cifar-models", args.backbone
+            model_backbone = torch.hub.load(provider, entry, pretrained=pretrained_flag)
+        else:
+            provider = "akamaster/pytorch_resnet_cifar10"
+            entry = args.backbone.replace("akamaster_", "") if args.backbone.startswith("akamaster_") else "resnet56"
+            model_backbone = torch.hub.load(provider, entry)
         args.input_size = 32
-        print(f"[Info] Loaded {args.backbone} from {provider} (input_size=32).")
-    elif args.backbone in ("cifar_resnet56", "resnet56_cifar", "akamaster_resnet56", "resnet56_cifar10") or (
-        re.match(r"^akamaster_resnet(20|32|44|56|110)$", args.backbone) is not None
-    ):
-        provider = "akamaster/pytorch_resnet_cifar10"
-        entry = args.backbone.replace("akamaster_", "") if args.backbone.startswith("akamaster_") else "resnet56"
-        model_backbone = torch.hub.load(provider, entry)
-        args.input_size = 32
+        args.resolved_model_source = "hub"
         print(f"[Info] Loaded {entry} from {provider} (input_size=32).")
+        return model_backbone
+    if source == "hub":
+        raise RuntimeError(f"Backbone '{args.backbone}' is not registered in the supported hub patterns.")
 
-    if model_backbone is None:
-        try:
-            if has_new_api:
-                from torchvision.models import get_model
+    try:
+        tv_names = set(_torchvision_classification_backbones())
+    except Exception:
+        tv_names = {name for name in dir(torchvision.models) if callable(getattr(torchvision.models, name, None))}
+
+    if source in ("auto", "torchvision") and args.backbone in tv_names:
+        tv_weights, has_new_api = _resolve_weights_multiapi(args.backbone, args.weights)
+        kwargs = {}
+        # Randomly initialized torchvision ViTs can be constructed for a custom image size.
+        if tv_weights is None and any(token in args.backbone.lower() for token in ("vit_", "vision_transformer")):
+            kwargs["image_size"] = int(args.input_size)
+        if has_new_api:
+            from torchvision.models import get_model
+            try:
+                model_backbone = get_model(args.backbone, weights=tv_weights, **kwargs)
+            except TypeError:
                 model_backbone = get_model(args.backbone, weights=tv_weights)
-            else:
-                fn = getattr(torchvision.models, args.backbone)
-                pretrained = tv_weights == "legacy_pretrained"
-                try:
-                    model_backbone = fn(pretrained=pretrained, num_classes=1000)
-                except TypeError:
-                    model_backbone = fn(pretrained=pretrained)
-            print(f"[Info] Loaded {args.backbone} from torchvision.")
-        except AttributeError as e:
-            raise RuntimeError(f"Backbone '{args.backbone}' is not available in torchvision or supported hubs.") from e
+        else:
+            function = getattr(torchvision.models, args.backbone)
+            try:
+                model_backbone = function(pretrained=tv_weights == "legacy_pretrained", **kwargs)
+            except TypeError:
+                model_backbone = function(pretrained=tv_weights == "legacy_pretrained")
+        if tv_weights is not None:
+            try:
+                crop = tv_weights.transforms().crop_size
+                args.input_size = int(crop[0] if isinstance(crop, (tuple, list)) else crop)
+            except Exception:
+                pass
+        args.resolved_model_source = "torchvision"
+        print(f"[Info] Loaded {args.backbone} from torchvision with weights={tv_weights}.")
+        return model_backbone
+    if source == "torchvision":
+        raise RuntimeError(f"Backbone '{args.backbone}' is not available in torchvision.")
 
-    return model_backbone
+    if source in ("auto", "timm"):
+        try:
+            import timm
+        except Exception as exc:
+            raise RuntimeError(
+                f"Backbone '{args.backbone}' was not found in torchvision and timm is unavailable. "
+                "Install the requirements or choose --model_source torchvision."
+            ) from exc
+        if args.backbone not in set(timm.list_models(pretrained=False)):
+            raise RuntimeError(f"Backbone '{args.backbone}' is not available in timm.")
+        create_kwargs = {"pretrained": pretrained_flag, "num_classes": int(args.nb_classes)}
+        try:
+            model_backbone = timm.create_model(args.backbone, img_size=int(args.input_size), **create_kwargs)
+        except TypeError:
+            model_backbone = timm.create_model(args.backbone, **create_kwargs)
+        args.resolved_model_source = "timm"
+        print(f"[Info] Loaded {args.backbone} from timm (pretrained={pretrained_flag}).")
+        return model_backbone
+
+    raise RuntimeError(f"Unable to resolve backbone '{args.backbone}' from source '{source}'.")
 
 
 def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
-    """Attach output-space adapters to common CNN and Transformer blocks."""
+    """Attach output-space adapters and return the number of insertion points."""
+    attached = []
     try:
         from torchvision.models.resnet import BasicBlock, Bottleneck
     except Exception:
@@ -531,6 +697,7 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
             return out
 
         module.register_forward_hook(hook)
+        attached.append(module)
 
     # Snapshot modules before adding adapters to avoid recursive insertion.
     for m in list(model_backbone.modules()):
@@ -561,32 +728,49 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
             attach(m, dim, layout="bhwc")
         elif LocalSwinBlock and isinstance(m, LocalSwinBlock):
             attach(m, int(m.dim), layout="bnc", grid_size=tuple(m.input_resolution))
+        elif args.tuning_method == "trso":
+            module_path = m.__class__.__module__.lower()
+            class_name = m.__class__.__name__.lower()
+            # timm Vision Transformer blocks expose norm1 with the embedding size.
+            if "vision_transformer" in module_path and class_name == "block" and hasattr(m, "norm1"):
+                shape = getattr(m.norm1, "normalized_shape", None)
+                if shape:
+                    attach(m, int(shape[0]), layout="bnc")
+            # timm Swin blocks use either BHWC or flattened BNC depending on version.
+            elif "swin_transformer" in module_path and "block" in class_name and hasattr(m, "norm1"):
+                shape = getattr(m.norm1, "normalized_shape", None)
+                if shape:
+                    attach(m, int(shape[0]), layout="auto")
+            # timm ConvNeXt blocks remain NCHW.
+            elif "convnext" in module_path and "block" in class_name:
+                channels = None
+                for candidate in (getattr(m, "conv_dw", None), getattr(m, "conv1", None)):
+                    if isinstance(candidate, nn.Conv2d):
+                        channels = int(candidate.out_channels)
+                        break
+                if channels is not None:
+                    attach(m, channels, layout="bchw")
+    return len(attached)
 
 
 def _add_adapters(model_backbone: nn.Module, args):
     method = args.tuning_method
     adapter_param_ids = set()
 
-    if method in ("full", "linear", "bitfit"):
+    if method in ("full", "linear", "bitfit", "prompt", "bam", "sidetune", "residual"):
         return model_backbone, adapter_param_ids
 
     if method in ("conv", "adapter"):
-        class ConvAdapter(nn.Module):
-            def __init__(self, c, k=args.kernel_size):
-                super().__init__()
-                hidden = max(1, int(c // max(1, int(args.adapt_size))))
-                self.net = nn.Sequential(
-                    nn.Conv2d(c, hidden, 1, bias=False),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(hidden, hidden, k, padding=k // 2, groups=hidden, bias=False),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(hidden, c, 1, bias=False),
-                )
-
-            def forward(self, x):
-                return self.net(x)
-
-        _attach_hook_adapters(model_backbone, args, lambda ch: ConvAdapter(ch))
+        if "resnet50" not in str(args.backbone).lower():
+            raise ValueError("Conv-Adapter paper reproduction requires ResNet-50.")
+        from models.tuning_modules.conv_adapter import apply_conv_adapter_resnet50
+        count = apply_conv_adapter_resnet50(
+            model_backbone,
+            mode=args.conv_adapter_mode,
+            kernel_size=args.kernel_size,
+            stages=(1, 2, 3, 4),
+        )
+        print(f"[Conv-Adapter] inserted {count} adapters using {args.conv_adapter_mode}.")
 
     elif method == "trso":
         from models.task_response_adapter import TaskResponseSpatialAdapter
@@ -606,99 +790,31 @@ def _add_adapters(model_backbone: nn.Module, args):
                 basis_trainable=args.trso_basis_trainable,
             )
 
-        _attach_hook_adapters(model_backbone, args, make_adapter)
-
-    elif method == "bam":
-        from models.tuning_modules.bam_adapter import BAMAdapter
-
-        def make_adapter(ch):
-            m = BAMAdapter(
-                channels=ch,
-                reduction=args.bam_reduction,
-                dilation=args.bam_dilation,
-                gate_init=args.bam_gate_init,
-                use_bn=args.bam_use_bn,
-            )
-            m.is_bam_adapter = True
-            return m
-
-        def attach_bam(module: nn.Module, out_ch: int):
-            if hasattr(module, "pet_adapter"):
-                return
-            module.add_module("pet_adapter", make_adapter(out_ch))
-            module.register_forward_hook(lambda mod, _inputs, out: mod.pet_adapter(out))
-
-        if args.bam_insert == "stage" and all(hasattr(model_backbone, f"layer{i}") for i in range(1, 5)):
-            stages = [int(s.strip()) for s in args.bam_stages.split(",") if s.strip().isdigit()]
-            for stage in stages:
-                layer = getattr(model_backbone, f"layer{stage}")
-                block = layer[-1]
-                if hasattr(block, "conv3"):
-                    out_ch = block.conv3.out_channels
-                elif hasattr(block, "conv2"):
-                    out_ch = block.conv2.out_channels
-                else:
-                    raise RuntimeError(f"Cannot infer BAM channels for ResNet stage {stage}")
-                attach_bam(block, out_ch)
-        else:
-            # all-block insertion or non-ResNet fallback
-            _attach_hook_adapters(model_backbone, args, make_adapter)
+        count = _attach_hook_adapters(model_backbone, args, make_adapter)
+        if count == 0:
+            raise RuntimeError("TRSO found no compatible CNN/ViT/Swin blocks in this backbone.")
 
     elif method == "ssf":
-        from models.tuning_modules.ssf import SSF
-        _attach_hook_adapters(
+        from models.tuning_modules.ssf import apply_ssf
+        records = apply_ssf(model_backbone, init_std=args.ssf_init_std)
+        print(f"[SSF] inserted {len(records)} paper-specified affine modules.")
+
+    elif method == "lora":
+        from models.tuning_modules.lora_transformer import apply_lora_transformer
+        count = apply_lora_transformer(
             model_backbone,
-            args,
-            lambda ch: SSF(ch, init_scale=args.ssf_init_scale, init_shift=args.ssf_init_shift),
+            rank=args.lora_r,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+            merge_weights=bool(args.lora_merge_weights),
         )
-
-    elif method == "lora_conv":
-        from models.tuning_modules.lora_conv import apply_lora_conv2d
-        apply_lora_conv2d(model_backbone, r=args.lora_r, alpha=args.lora_alpha, target=args.lora_target)
-
-    elif method == "residual":
-        try:
-            from models.tuning_modules.residual_adapter import (
-                ParallelResidualAdapter,
-                SeriesResidualAdapter,
-                attach_residual_adapters_resnet,
-            )
-            if args.backbone.startswith("resnet"):
-                stages = [int(s.strip()) for s in args.ra_stages.split(",") if s.strip().isdigit()]
-                model_backbone = attach_residual_adapters_resnet(
-                    model_backbone,
-                    mode=args.ra_mode,
-                    reduction=args.ra_reduction,
-                    norm=args.ra_norm,
-                    act=args.ra_act,
-                    gate_init=args.ra_gate_init,
-                    stages=stages,
-                )
-                from models.tuning_modules.residual_adapter import residual_adapter_trainable_parameters
-                for mod in model_backbone.modules():
-                    if isinstance(mod, (ParallelResidualAdapter, SeriesResidualAdapter)):
-                        for p in residual_adapter_trainable_parameters(mod):
-                            adapter_param_ids.add(id(p))
-                return model_backbone, adapter_param_ids
-        except Exception as e:
-            print(f"[Warn] residual_adapter wrapper failed ({e}); falling back to hook-based residual adapters.")
-
-        class ResidualCore(nn.Module):
-            def __init__(self, c):
-                super().__init__()
-                hidden = max(1, c // max(1, args.ra_reduction))
-                norm = nn.BatchNorm2d(hidden) if args.ra_norm == "bn" else nn.GroupNorm(1, hidden) if args.ra_norm == "ln" else nn.Identity()
-                act = {"relu": nn.ReLU, "gelu": nn.GELU, "silu": nn.SiLU, "none": nn.Identity}[args.ra_act]()
-                self.core = nn.Sequential(nn.Conv2d(c, hidden, 1, bias=False), norm, act, nn.Conv2d(hidden, c, 1, bias=False))
-                self.gate = nn.Parameter(torch.tensor(float(args.ra_gate_init)))
-
-            def forward(self, x):
-                return self.core(x) * self.gate
-
-        _attach_hook_adapters(model_backbone, args, lambda ch: ResidualCore(ch))
+        print(f"[LoRA] wrapped {count} Transformer Q/V attention projections.")
 
     else:
-        raise ValueError(f"Unsupported PET method for torchvision branch: {method}")
+        raise ValueError(
+            f"Unsupported strict paper baseline: {method}. "
+            "LoRA-Conv and former hook approximations were removed from the paper-reproduction path."
+        )
 
     return model_backbone, adapter_param_ids
 
@@ -707,42 +823,120 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
     method = args.tuning_method
     extra_adapter_param_ids = extra_adapter_param_ids or set()
 
-    for p in model.parameters():
-        p.requires_grad = False
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
 
     if method == "full":
-        for p in model.parameters():
-            p.requires_grad = True
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
         return model
 
     if method == "linear":
-        for name, p in model.named_parameters():
-            if _is_head_param(name):
-                p.requires_grad = True
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(_is_head_param(name))
         _freeze_batchnorm(model)
+        return model
+
+    if method == "prompt":
+        # Original visual prompting optimizes only the prompt. The pretrained
+        # output classifier remains frozen and is accessed through fixed labels.
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(name.startswith("tuning_module."))
+        if not any(parameter.requires_grad for parameter in model.parameters()):
+            raise RuntimeError("Visual prompting produced no trainable prompt parameters")
+        model.backbone.eval()
+        args.weight_decay = 0.0
+        return model
+
+    if method == "bam":
+        # BAM is trained jointly with ResNet-50 in the original architecture.
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+        return model
+
+    if method in ("conv", "adapter"):
+        from models.tuning_modules.conv_adapter import set_conv_adapter_trainability
+        set_conv_adapter_trainability(model)
+        _freeze_batchnorm(model)
+        return model
+
+    if method == "residual":
+        from models.tuning_modules.residual_adapter import set_residual_adapter_trainability
+        set_residual_adapter_trainability(model)
+        return model
+
+    if method == "ssf":
+        from models.tuning_modules.ssf import set_ssf_trainability
+        set_ssf_trainability(model)
+        return model
+
+    if method == "lora":
+        from models.tuning_modules.lora_transformer import mark_only_lora_as_trainable
+        mark_only_lora_as_trainable(model, train_bias="none")
+        for name, parameter in model.named_parameters():
+            if _is_head_param(name):
+                parameter.requires_grad_(True)
         return model
 
     if method == "bitfit":
-        for name, p in model.named_parameters():
+        for name, parameter in model.named_parameters():
             if name.endswith(".bias"):
-                p.requires_grad = True
+                parameter.requires_grad_(True)
             if args.bitfit_train_head and _is_head_param(name):
-                p.requires_grad = True
+                parameter.requires_grad_(True)
         args.weight_decay = 0.0
-        _freeze_batchnorm(model)
         return model
 
-    # PEFT: adapters and task head only.
-    tokens = ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adapter", "side", "lora_down", "lora_up")
-    for name, p in model.named_parameters():
-        if name.endswith("probe_kernel"):
-            p.requires_grad = False
-        elif _is_head_param(name) or name == "alpha_logit" or any(tok in name for tok in tokens) or id(p) in extra_adapter_param_ids:
-            p.requires_grad = True
+    if method == "sidetune":
+        for name, parameter in model.named_parameters():
+            trainable = name.startswith("side.") or name.startswith("head.") or name == "alpha_logit"
+            parameter.requires_grad_(trainable)
+        model.base.eval()
+        return model
 
-    _freeze_batchnorm(model)
-    return model
+    if method == "trso":
+        tokens = ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate")
+        for name, parameter in model.named_parameters():
+            if name.endswith("probe_kernel"):
+                parameter.requires_grad_(False)
+            elif _is_head_param(name) or any(token in name for token in tokens) or id(parameter) in extra_adapter_param_ids:
+                parameter.requires_grad_(True)
+        _freeze_batchnorm(model)
+        if not any(parameter.requires_grad for parameter in model.parameters()):
+            raise RuntimeError("TRSO produced no trainable parameters")
+        return model
 
+    raise ValueError(f"Unsupported strict paper baseline: {method}")
+
+
+
+def build_task_criterion(args, mixup_active: bool = False):
+    task_type = getattr(args, "task_type", TASK_SINGLE_LABEL)
+    if task_type == TASK_MULTILABEL:
+        return nn.BCEWithLogitsLoss()
+    if task_type == TASK_REGRESSION:
+        return nn.SmoothL1Loss() if getattr(args, "regression_loss", "mse") == "smooth_l1" else nn.MSELoss()
+    if mixup_active:
+        return SoftTargetCrossEntropy()
+    smoothing = float(getattr(args, "smoothing", 0.0) or 0.0)
+    if smoothing > 0.0:
+        return LabelSmoothingCrossEntropy(smoothing=smoothing)
+    return nn.CrossEntropyLoss()
+
+
+def primary_metric(task_type: str):
+    if task_type == TASK_MULTILABEL:
+        return "map", True
+    if task_type == TASK_REGRESSION:
+        return "mae", False
+    return "acc1", True
+
+
+def format_primary(stats: Dict, task_type: str) -> str:
+    name, _ = primary_metric(task_type)
+    value = float(stats.get(name, float("nan")))
+    label = {"acc1": "Acc@1", "map": "mAP", "mae": "MAE"}[name]
+    return f"{label}={value:.5f}"
 
 
 def _classification_logits(output):
@@ -789,7 +983,7 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
         return [name for name, _ in adapters]
 
     was_training = model.training
-    criterion = nn.CrossEntropyLoss()
+    criterion = build_task_criterion(args, mixup_active=False)
 
     # Optional small head warm-up makes task-response gradients less dependent on a
     # randomly initialized classifier while preserving the frozen backbone.
@@ -894,9 +1088,21 @@ def build_datasets(args):
         try:
             dataset_test, _ = build_dataset_split(args=args, split="test")
         except Exception as e:
-            print(f"[Warn] test split unavailable for {args.dataset}: {e}. Final test will use validation split.")
-            dataset_test = dataset_val
+            if args.allow_val_as_test:
+                print(f"[Warn] test split unavailable for {args.dataset}: {e}. --allow_val_as_test=True, so validation is reused.")
+                dataset_test = dataset_val
+            else:
+                raise RuntimeError(
+                    f"A distinct test split is unavailable for dataset '{args.dataset}'. "
+                    "Provide a test split or explicitly set --allow_val_as_test True."
+                ) from e
     return dataset_train, dataset_val, dataset_test
+
+
+def _seed_data_worker(worker_id: int):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def build_samplers(args, dataset_train, dataset_val, dataset_test):
@@ -906,7 +1112,8 @@ def build_samplers(args, dataset_train, dataset_val, dataset_test):
     if getattr(args, "distributed", False):
         sampler_train = torch.utils.data.DistributedSampler(dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed)
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_generator = torch.Generator().manual_seed(int(args.seed) + int(global_rank))
+        sampler_train = torch.utils.data.RandomSampler(dataset_train, generator=sampler_generator)
 
     def eval_sampler(ds):
         if ds is None:
@@ -918,47 +1125,137 @@ def build_samplers(args, dataset_train, dataset_val, dataset_test):
     return sampler_train, eval_sampler(dataset_val), eval_sampler(dataset_test)
 
 
+def _parse_prompt_indices(value: str, num_classes: int):
+    text = str(value or "").strip()
+    if not text:
+        return list(range(int(num_classes)))
+    indices = [int(item.strip()) for item in text.split(",") if item.strip()]
+    if len(indices) != int(num_classes):
+        raise ValueError("--prompt_output_indices must contain exactly nb_classes indices")
+    return indices
+
+
 def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
+    # The original visual-prompting baseline requires a frozen pretrained
+    # classifier output space. A feature-only CLIP visual encoder is therefore
+    # not a faithful implementation and is rejected by the compatibility table.
     if args.clip_model:
         if clip_visual is None or clip_feat_dim is None:
             raise RuntimeError("CLIP requested but not initialized.")
-        model = CLIPLinearProbe(clip_visual, int(clip_feat_dim), args.nb_classes, freeze_backbone=bool(args.freeze_backbone))
+        family = "clip_transformer" if str(args.clip_model).upper().startswith("VIT") else "clip_cnn"
+        validate_method_backbone(args.tuning_method, family)
+        if args.tuning_method not in ("full", "linear", "bitfit"):
+            raise ValueError("Strict CLIP branch supports full, linear, and BitFit only.")
+        model = CLIPLinearProbe(
+            clip_visual,
+            int(clip_feat_dim),
+            args.nb_classes,
+            freeze_backbone=bool(args.freeze_backbone),
+        )
+        model.backbone_family = family
         return model, set()
 
-    tv_methods = ("full", "linear", "conv", "adapter", "trso", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune")
-    if args.tuning_method in tv_methods:
-        model_backbone = _build_torchvision_or_hub_backbone(args)
-        if args.tuning_method == "sidetune":
-            from models.tuning_modules.side_tuning import SideTuningClassifier
-            model = SideTuningClassifier(
-                base_model=model_backbone,
-                num_classes=args.nb_classes,
-                side_width=args.sidetune_width,
-                side_depth=args.sidetune_depth,
-                learn_alpha=bool(args.sidetune_learn_alpha),
-                alpha_init=float(args.sidetune_alpha),
+    # Residual Adapters use their original dedicated ResNet-26 rather than
+    # wrapping an arbitrary torchvision model.
+    if args.tuning_method == "residual":
+        from models.tuning_modules.residual_adapter import ResidualAdapterResNet26
+        model = ResidualAdapterResNet26(num_classes=args.nb_classes, mode=args.ra_mode)
+        if args.ra_pretrained_checkpoint:
+            checkpoint = safe_torch_load(args.ra_pretrained_checkpoint, map_location="cpu")
+            state = _extract_checkpoint_model(checkpoint, args.model_key) if isinstance(checkpoint, dict) else checkpoint
+            incompat = model.load_shared_state_dict(state, strict=False)
+            print(f"[Residual Adapter] loaded shared checkpoint; missing={len(incompat.missing_keys)} unexpected={len(incompat.unexpected_keys)}")
+        elif str(args.weights).lower() not in {"none", "scratch", "random"}:
+            raise ValueError(
+                "Strict Residual Adapter transfer requires --ra_pretrained_checkpoint. "
+                "Use --weights none only for architecture smoke tests."
             )
-            return model, set()
+        args.backbone_family = "resnet"
+        return model, set()
 
-        _replace_classifier_head(model_backbone, args.nb_classes, keep_pretrained_head=args.keep_pretrained_head)
-        model_backbone, adapter_param_ids = _add_adapters(model_backbone, args)
-        return model_backbone, adapter_param_ids
+    model_backbone = _build_torchvision_or_hub_backbone(args)
+    family = detect_backbone_family(
+        model_backbone,
+        backbone_name=args.backbone,
+        source=getattr(args, "resolved_model_source", args.model_source),
+    )
+    if family == "unknown":
+        raise RuntimeError(
+            f"Could not determine the architecture family of '{args.backbone}'. "
+            "Use a registered torchvision/timm model or add an explicit family detector."
+        )
+    validate_method_backbone(args.tuning_method, family)
+    args.backbone_family = family
+    model_backbone.backbone_family = family
+    print(f"[Compatibility] method={args.tuning_method} | family={family} | source={getattr(args, 'resolved_model_source', 'unknown')}")
 
-    # Fallback to original repo builder for prompt/VPT or other custom models.
-    model = build_model(args.model, pretrained=True, num_classes=args.nb_classes, tuning_method=args.tuning_method, args=args)
-    return model, set()
+    if args.tuning_method == "prompt":
+        from models.tuning_modules.prompter import VisualPromptingClassifier
+        indices = _parse_prompt_indices(args.prompt_output_indices, args.nb_classes)
+        return VisualPromptingClassifier(
+            backbone=model_backbone,
+            num_classes=args.nb_classes,
+            prompt_size=args.prompt_size,
+            image_size=args.input_size,
+            output_indices=indices,
+        ), set()
+
+    if args.tuning_method == "sidetune":
+        from models.tuning_modules.side_tuning import SideTuningClassifier
+        model = SideTuningClassifier(
+            base_model=model_backbone,
+            num_classes=args.nb_classes,
+            learn_alpha=bool(args.sidetune_learn_alpha),
+            alpha_init=float(args.sidetune_alpha),
+        )
+        model.backbone_family = family
+        return model, set()
+
+    if args.tuning_method == "bam":
+        if "resnet50" not in str(args.backbone).lower():
+            raise ValueError("BAM paper reproduction requires a ResNet-50 backbone.")
+        from models.tuning_modules.bam_adapter import BAMResNet50
+        return BAMResNet50(
+            model_backbone,
+            num_classes=args.nb_classes,
+            reduction_ratio=args.bam_reduction,
+            dilation_conv_num=2,
+            dilation_val=args.bam_dilation,
+        ), set()
+
+    if not _replace_classifier_head(model_backbone, args.nb_classes, keep_pretrained_head=args.keep_pretrained_head):
+        raise RuntimeError(
+            f"No replaceable task head was found for backbone '{args.backbone}'. "
+            "This run is stopped to avoid training with an incorrect output dimension."
+        )
+
+    model_backbone, adapter_param_ids = _add_adapters(model_backbone, args)
+    return model_backbone, adapter_param_ids
 
 
 def main(args):
     args = canonicalize_args(args)
 
+    if args.list_compatibility:
+        for row in compatibility_rows():
+            print(f"{row['method']:12s} | {','.join(row['families']):45s} | {row['implementation_scope']}")
+        return
+
     if args.list_backbones:
+        import torchvision
+        print("[torchvision]")
+        for name in _torchvision_classification_backbones():
+            print(name)
         try:
-            from torchvision.models import list_models
-            for n in sorted(n for n in list_models() if not n.startswith("video")):
-                print(n)
-        except Exception as e:
-            print(f"[Warn] list_backbones failed: {e}")
+            import timm
+            print("[timm]")
+            for name in timm.list_models(pretrained=False):
+                print(name)
+        except Exception:
+            print("[timm unavailable: install timm to enable its backbone catalogue]")
+        print("[datasets]")
+        for name in available_datasets():
+            print(name)
         return
 
     utils.init_distributed_mode(args)
@@ -978,7 +1275,15 @@ def main(args):
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-    cudnn.benchmark = device.type == "cuda"
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+    else:
+        cudnn.benchmark = device.type == "cuda"
 
     clip_preprocess = None
     clip_visual = None
@@ -1034,6 +1339,7 @@ def main(args):
     else:
         log_writer = None
 
+    loader_generator = torch.Generator().manual_seed(seed)
     drop_last = len(dataset_train) >= args.batch_size
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -1042,6 +1348,8 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=drop_last,
+        worker_init_fn=_seed_data_worker,
+        generator=loader_generator,
     )
     data_loader_val = None
     if dataset_val is not None:
@@ -1052,6 +1360,8 @@ def main(args):
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
+            worker_init_fn=_seed_data_worker,
+            generator=torch.Generator().manual_seed(seed + 1000),
         )
     data_loader_test = None
     if dataset_test is not None:
@@ -1062,10 +1372,14 @@ def main(args):
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
+            worker_init_fn=_seed_data_worker,
+            generator=torch.Generator().manual_seed(seed + 2000),
         )
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0.0 or args.cutmix_minmax is not None
+    if mixup_active and args.task_type != TASK_SINGLE_LABEL:
+        raise ValueError("Mixup/CutMix is supported only for single-label classification.")
     if mixup_active:
         print("Mixup is activated!")
         mixup_fn = Mixup(
@@ -1162,18 +1476,24 @@ def main(args):
     for name, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-        is_adapter_like = any(tok in name for tok in ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adapter", "side")) or id(p) in adapter_param_ids
+        is_adapter_like = any(tok in name for tok in ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adapter", "side", "tuning_module", "prompt")) or id(p) in adapter_param_ids
         (adapter_like if is_adapter_like else other).append(p)
     print(f"[ParamGroups] adapter_like={sum(p.numel() for p in adapter_like):,} others={sum(p.numel() for p in other):,}")
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": adapter_like, "lr": args.lr, "weight_decay": args.weight_decay_adapter},
-            {"params": other, "lr": args.lr, "weight_decay": args.weight_decay},
-        ],
-        betas=(0.9, 0.999),
-        eps=args.opt_eps,
-    )
+    parameter_groups = []
+    if adapter_like:
+        parameter_groups.append({"params": adapter_like, "lr": args.lr, "weight_decay": args.weight_decay_adapter})
+    if other:
+        parameter_groups.append({"params": other, "lr": args.lr, "weight_decay": args.weight_decay})
+    if not parameter_groups:
+        raise RuntimeError("No trainable parameters were supplied to the optimizer")
+    if args.optimizer == "sgd":
+        optimizer = torch.optim.SGD(parameter_groups, lr=args.lr, momentum=args.momentum)
+    elif args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(parameter_groups, lr=args.lr, betas=(0.9, 0.999), eps=args.opt_eps)
+    else:
+        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+    print(f"Optimizer = {optimizer.__class__.__name__}")
     loss_scaler = NativeScaler()
 
     lr_schedule_values = utils.cosine_scheduler(
@@ -1188,13 +1508,9 @@ def main(args):
         args.weight_decay_end = args.weight_decay
     wd_schedule_values = utils.cosine_scheduler(args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
 
-    if mixup_fn is not None:
-        criterion = SoftTargetCrossEntropy()
-    elif args.smoothing > 0.0:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
-    print(f"criterion = {criterion}")
+    criterion = build_task_criterion(args, mixup_active=mixup_fn is not None)
+    eval_criterion = build_task_criterion(args, mixup_active=False)
+    print(f"criterion = {criterion} | task={args.task_type}")
 
     utils.auto_load_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
@@ -1212,19 +1528,29 @@ def main(args):
         else:
             print(f"[Warn] --head_from provided but no matching head keys were found: {args.head_from}")
 
+    metric_name, maximize_metric = primary_metric(args.task_type)
+
     if args.eval:
         print("Eval only mode")
         eval_loader = data_loader_test if data_loader_test is not None else data_loader_val
         eval_ds = dataset_test if data_loader_test is not None else dataset_val
         if eval_loader is None:
             raise RuntimeError("No evaluation loader available.")
-        stats = evaluate(eval_loader, model, device, use_amp=args.use_amp, measure_latency=args.measure_eval_latency)
-        print(f"Accuracy of the network on {len(eval_ds)} images: {stats['acc1']:.5f}%")
+        stats = evaluate(
+            eval_loader,
+            model,
+            device,
+            use_amp=args.use_amp,
+            measure_latency=args.measure_eval_latency,
+            task_type=args.task_type,
+            criterion=eval_criterion,
+        )
+        print(f"Evaluation on {len(eval_ds)} samples: {format_primary(stats, args.task_type)}")
         if args.output_dir:
             save_json_on_master(stats, os.path.join(args.output_dir, "eval_summary.json"))
         return
 
-    best_val_acc = -1.0
+    best_val_metric = float("-inf") if maximize_metric else float("inf")
     best_epoch = -1
     history = []
     start_time = time.time()
@@ -1254,27 +1580,53 @@ def main(args):
             num_training_steps_per_epoch=num_training_steps_per_epoch,
             update_freq=args.update_freq,
             use_amp=args.use_amp,
+            task_type=args.task_type,
         )
 
         if args.output_dir and args.save_ckpt and ((epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs):
-            utils.save_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+            utils.save_model(
+                args=args,
+                model=model,
+                model_without_ddp=model_without_ddp,
+                optimizer=optimizer,
+                loss_scaler=loss_scaler,
+                epoch=epoch,
+                model_ema=model_ema,
+            )
 
         val_stats = {}
         if data_loader_val is not None:
-            val_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
-            print(f"Validation accuracy on {len(dataset_val)} images: {val_stats['acc1']:.3f}%")
-            if val_stats["acc1"] > best_val_acc:
-                best_val_acc = val_stats["acc1"]
+            val_stats = evaluate(
+                data_loader_val,
+                model,
+                device,
+                use_amp=args.use_amp,
+                task_type=args.task_type,
+                criterion=eval_criterion,
+            )
+            current_metric = float(val_stats[metric_name])
+            is_better = current_metric > best_val_metric if maximize_metric else current_metric < best_val_metric
+            print(f"Validation on {len(dataset_val)} samples: {format_primary(val_stats, args.task_type)}")
+            if is_better:
+                best_val_metric = current_metric
                 best_epoch = epoch
                 if args.output_dir and args.save_ckpt:
-                    utils.save_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
-            print(f"Best validation accuracy: {best_val_acc:.3f}% at epoch {best_epoch}")
+                    utils.save_model(
+                        args=args,
+                        model=model,
+                        model_without_ddp=model_without_ddp,
+                        optimizer=optimizer,
+                        loss_scaler=loss_scaler,
+                        epoch="best",
+                        model_ema=model_ema,
+                    )
+            best_stats = {metric_name: best_val_metric}
+            print(f"Best validation {format_primary(best_stats, args.task_type)} at epoch {best_epoch}")
 
         if log_writer is not None and val_stats:
-            log_writer.update(val_acc1=val_stats["acc1"], head="perf", step=epoch)
-            if "acc5" in val_stats:
-                log_writer.update(val_acc5=val_stats["acc5"], head="perf", step=epoch)
-            log_writer.update(val_loss=val_stats["loss"], head="perf", step=epoch)
+            for key, value in val_stats.items():
+                if isinstance(value, (int, float)):
+                    log_writer.update(**{f"val_{key}": value}, head="perf", step=epoch)
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
@@ -1282,8 +1634,10 @@ def main(args):
             "epoch": epoch,
             "n_trainable_parameters": n_trainable,
             "n_total_parameters": n_total,
-            "best_val_acc1": best_val_acc,
+            f"best_val_{metric_name}": best_val_metric,
             "best_epoch": best_epoch,
+            "primary_metric": metric_name,
+            "maximize_primary_metric": maximize_metric,
         }
         history.append(log_stats)
 
@@ -1296,37 +1650,60 @@ def main(args):
                 save_json_on_master(history, os.path.join(args.output_dir, "history.json"))
 
         if args.model_ema and args.model_ema_eval and data_loader_val is not None:
-            ema_stats = evaluate(data_loader_val, model_ema.ema, device, use_amp=args.use_amp)
-            print(f"EMA validation accuracy: {ema_stats['acc1']:.3f}%")
+            ema_stats = evaluate(
+                data_loader_val,
+                model_ema.ema,
+                device,
+                use_amp=args.use_amp,
+                task_type=args.task_type,
+                criterion=eval_criterion,
+            )
+            print(f"EMA validation: {format_primary(ema_stats, args.task_type)}")
 
     total_time = time.time() - start_time
     print(f"Training time {str(datetime.timedelta(seconds=int(total_time)))}")
 
-    # Convergence summary.
     convergence_summary = {
-        "best_val_acc1": best_val_acc,
+        f"best_val_{metric_name}": best_val_metric,
+        "primary_metric": metric_name,
+        "maximize_primary_metric": maximize_metric,
         "best_epoch": best_epoch,
         "total_train_time_sec": total_time,
         "epochs": args.epochs,
         "n_trainable_parameters": n_trainable,
         "n_total_parameters": n_total,
     }
-    if history and best_val_acc > 0:
-        target = 0.95 * best_val_acc
-        epochs_to_95 = None
-        for h in history:
-            if h.get("val_acc1", -1) >= target:
-                epochs_to_95 = int(h["epoch"]) + 1
-                break
-        convergence_summary["epochs_to_95pct_best"] = epochs_to_95
-        convergence_summary["mean_epoch_time_sec"] = float(np.mean([h.get("train_epoch_time", 0.0) for h in history]))
-        mem_values = [h.get("train_peak_train_memory_mb") for h in history if h.get("train_peak_train_memory_mb") is not None]
+    if history and best_epoch >= 0:
+        if maximize_metric and best_val_metric > 0:
+            target = 0.95 * best_val_metric
+            epochs_to_target = next(
+                (int(row["epoch"]) + 1 for row in history if row.get(f"val_{metric_name}", float("-inf")) >= target),
+                None,
+            )
+            convergence_summary["epochs_to_95pct_best"] = epochs_to_target
+        elif not maximize_metric and np.isfinite(best_val_metric):
+            # For an error metric, reaching within 5% of the best error is the analogous threshold.
+            target = 1.05 * best_val_metric
+            epochs_to_target = next(
+                (int(row["epoch"]) + 1 for row in history if row.get(f"val_{metric_name}", float("inf")) <= target),
+                None,
+            )
+            convergence_summary["epochs_to_within_5pct_best"] = epochs_to_target
+
+        convergence_summary["mean_epoch_time_sec"] = float(
+            np.mean([row.get("train_epoch_time", 0.0) for row in history])
+        )
+        mem_values = [
+            row.get("train_peak_train_memory_mb")
+            for row in history
+            if row.get("train_peak_train_memory_mb") is not None
+        ]
         if mem_values:
             convergence_summary["peak_train_memory_mb"] = float(max(mem_values))
     if args.output_dir:
         save_json_on_master(convergence_summary, os.path.join(args.output_dir, "convergence_summary.json"))
 
-    # Final test: load best validation checkpoint and evaluate once.
+    # Final test: restore the best validation checkpoint and evaluate once.
     if data_loader_test is not None:
         best_ckpt = os.path.join(args.output_dir, "checkpoint-best.pth") if args.output_dir else ""
         if best_ckpt and os.path.exists(best_ckpt):
@@ -1335,11 +1712,19 @@ def main(args):
                 state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
                 model_without_ddp.load_state_dict(state, strict=False)
                 print(f"[Info] Loaded best checkpoint for final test: {best_ckpt}")
-            except Exception as e:
-                print(f"[Warn] Failed to reload best checkpoint ({best_ckpt}): {e}")
+            except Exception as exc:
+                print(f"[Warn] Failed to reload best checkpoint ({best_ckpt}): {exc}")
                 print("[Warn] Continuing final test with the current in-memory model.")
-        test_stats = evaluate(data_loader_test, model, device, use_amp=args.use_amp, measure_latency=args.measure_eval_latency)
-        print(f"Final test accuracy on {len(dataset_test)} images: {test_stats['acc1']:.3f}%")
+        test_stats = evaluate(
+            data_loader_test,
+            model,
+            device,
+            use_amp=args.use_amp,
+            measure_latency=args.measure_eval_latency,
+            task_type=args.task_type,
+            criterion=eval_criterion,
+        )
+        print(f"Final test on {len(dataset_test)} samples: {format_primary(test_stats, args.task_type)}")
         if args.output_dir:
             save_json_on_master(test_stats, os.path.join(args.output_dir, "test_summary.json"))
 
@@ -1349,19 +1734,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args = canonicalize_args(args)
 
-    if args.list_backbones:
+    if args.list_backbones or args.list_compatibility:
         main(args)
         raise SystemExit(0)
 
-    # Keep compatibility with original repo auto hyperparameter loader, but avoid overwriting revision baselines.
-    if not args.is_tuning and args.tuning_method not in ("full", "linear"):
+    # The original table can overwrite explicit CLI choices. It is now opt-in.
+    if args.legacy_auto_hparams and not args.is_tuning and args.tuning_method not in ("full", "linear"):
         try:
             args = utils.auto_load_optim_param(args, args.model, args.tuning_method, args.dataset)
             args = canonicalize_args(args)
-        except Exception as e:
-            print(f"[Warn] auto_load_optim_param failed or unavailable: {e}")
-    else:
-        args.save_ckpt = False if args.is_tuning else args.save_ckpt
+        except Exception as exc:
+            print(f"[Warn] legacy auto_load_optim_param failed or unavailable: {exc}")
+    elif args.is_tuning:
+        args.save_ckpt = False
 
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)

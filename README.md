@@ -1,5 +1,11 @@
 # Scientific TRSO
 
+> **Strict baseline fidelity:** paper-named baselines now use only their
+> published architecture domain and active computational graph. Unsupported
+> pairings fail before training. See `BASELINE_FIDELITY.md`,
+> `SUPPORT_MATRIX.md`, and `PAPER_REPRODUCTION.md`.
+
+
 **Task-Response Spatial Operator Adaptation for parameter-efficient visual fine-tuning**
 
 Scientific TRSO is intentionally based on three components only:
@@ -17,6 +23,31 @@ It supports:
 - Swin-style tensors in `B x H x W x C` format.
 
 Class and prefix tokens are preserved exactly.
+
+## Framework support extension
+
+The repository now uses one shared, task-aware training pipeline for:
+
+- single-label classification;
+- multi-label classification;
+- image regression.
+
+It exposes 37 active dataset routes, 80 filtered torchvision
+image-classification builders in the current environment, optional timm and
+Torch Hub backbones, and OpenAI CLIP/OpenCLIP visual encoders.
+
+Baseline support is intentionally **domain-safe**. CNN baselines remain CNN
+baselines, Transformer baselines remain Transformer baselines, and unsupported
+method/backbone pairs stop before training rather than being silently adapted.
+
+```bash
+python main.py --list_compatibility
+python main.py --list_backbones
+```
+
+See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the method contract,
+[BASELINE_FIDELITY.md](BASELINE_FIDELITY.md) for paper-versus-implementation
+labels, and [DATASETS.md](DATASETS.md) for dataset layouts and split protocols.
 
 ## 1. Scientific formulation
 
@@ -171,11 +202,8 @@ Run the complete regression suite:
 python -m pytest -q
 ```
 
-Latest local result:
-
-```text
-36 passed, 10 subtests passed
-```
+Latest local regression and integration result is recorded in
+[TEST_REPORT.md](TEST_REPORT.md).
 
 ### Controlled scientific results
 
@@ -212,6 +240,9 @@ python -m venv .venv
 source .venv/bin/activate
 # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# Optional COCO, CLIP and experiment-logging integrations
+pip install -r requirements-optional.txt
 ```
 
 Install the appropriate CUDA-enabled PyTorch build separately for GPU experiments.
@@ -287,3 +318,53 @@ Before making a publication claim, run:
 ## Limitations
 
 The repository now verifies the mathematics and implementation of the proposal. It does not yet prove that TRSO outperforms strong PEFT baselines on real visual-transfer benchmarks. The synthetic transfer result establishes only that the proposed response subspace can recover a controlled spatial shift more efficiently than a random subspace.
+
+## 11. Additional task examples
+
+### Pascal VOC 2007 multi-label classification
+
+```bash
+python main.py \
+  --tuning_method full \
+  --backbone resnet50 \
+  --weights DEFAULT \
+  --dataset voc2007 \
+  --task multilabel \
+  --data_path ./data \
+  --epochs 50 \
+  --output_dir ./experiments/voc2007_resnet50_full
+```
+
+### CelebA landmark regression
+
+```bash
+python main.py \
+  --tuning_method linear \
+  --backbone vit_b_16 \
+  --weights DEFAULT \
+  --dataset celeba \
+  --celeba_task landmarks \
+  --task regression \
+  --data_path ./data \
+  --regression_loss smooth_l1 \
+  --output_dir ./experiments/celeba_landmarks_vit_linear
+```
+
+### Original Transformer LoRA
+
+```bash
+python main.py \
+  --tuning_method lora \
+  --backbone vit_b_16 \
+  --weights DEFAULT \
+  --dataset flowers102 \
+  --data_path ./data \
+  --lora_r 8 \
+  --lora_alpha 16 \
+  --output_dir ./experiments/flowers102_vit_lora
+```
+
+`lora` is restricted to Transformer Q/V attention projections. The former
+`lora_conv` control is excluded from strict paper-reproduction runs because it
+is not the original LoRA method.
+

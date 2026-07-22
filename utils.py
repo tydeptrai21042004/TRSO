@@ -5,7 +5,10 @@ import json
 from collections import defaultdict, deque
 import datetime
 import numpy as np
-from timm.utils import get_state_dict
+try:
+    from timm.utils import get_state_dict
+except Exception:
+    from compat.timm_compat import get_state_dict
 
 from pathlib import Path
 

@@ -1,37 +1,51 @@
 # Verification report
 
-## Automated tests
+## Automated result
 
 ```text
-58 passed
+85 passed
 ```
 
-The suite covers:
+Run with:
 
-- exact visual-prompt trainability and fixed output mapping;
-- Conv-Adapter topology and ResNet-50 insertion;
-- BAM equation, two-dilation spatial branch, and stage placement;
-- dedicated ResNet-26 residual-adapter architecture and series/parallel modes;
-- SSF insertion inside ViT operations;
-- LoRA zero-update identity and merge/unmerge;
-- BitFit trainability;
-- copy-initialized Side-Tuning;
-- dataset/task protocols and TRSO mathematical/integration tests.
+```bash
+./scripts/test_all.sh
+```
 
-## Paper-baseline preflight
+## New regression coverage
 
-`test_reports/paper_baselines_preflight.json` reports successful forward and
-backward passes for visual prompting, Conv-Adapter, BAM, residual adapters, SSF,
-LoRA, BitFit, and Side-Tuning.
+### Training and resumption
 
-## TRSO preflight
+- incomplete gradient-accumulation windows still perform an optimizer step;
+- exact accumulation windows preserve the expected step count;
+- frozen BatchNorm running statistics remain unchanged during PEFT/linear-probe training;
+- TRSO active rank is restored before optimizer construction;
+- the post-load hook restores rank-specific `requires_grad` state;
+- strict resume rejects architecture-mismatched checkpoints;
+- optimizer state, epoch, best metric, best epoch and history are restored.
 
-`test_reports/trso_preflight.json` verifies CNN, ViT and BHWC shapes, class-token
-preservation, fused-kernel agreement, gradient flow, calibration tangent
-alignment, and configured spatial rank.
+### Baseline fidelity
 
-## Training smoke
+- Conv-Adapter released equation and ResNet bottleneck insertion location;
+- padding, fixed-patch and random-patch visual prompts;
+- Residual Adapter option-A shortcut, series order and shared-filter coverage;
+- SSF merged/unmerged numerical equivalence;
+- LoRA nonzero merge/unmerge equivalence and unsupported MHA dropout guard;
+- BitFit bias-scope and task-head policy;
+- lightweight Side-Tuning default and frozen base model.
 
-`test_reports/prompt_training_smoke/` contains a complete one-epoch FakeData
-training run using strict visual prompting. The run trains 720 prompt parameters
-and leaves the original ResNet classifier frozen.
+### TRSO scientific controls
+
+- response, random and DCT basis construction;
+- exact, greedy and uniform allocation under a common budget;
+- energy, energy-per-parameter, energy-per-channel and noise-adjusted scores;
+- deterministic experiment-grid and manifest generation.
+
+## Baseline-only release test
+
+```bash
+./scripts/test_all_baselines.sh
+```
+
+This script now uses pytest consistently and no longer reports zero integration
+tests through an incompatible unittest invocation.

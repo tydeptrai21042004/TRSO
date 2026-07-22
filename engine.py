@@ -85,7 +85,11 @@ def train_one_epoch(
 
     update_freq = int(update_freq or 1)
     start_steps = int(start_steps or 0)
-    num_training_steps_per_epoch = int(num_training_steps_per_epoch or len(data_loader))
+    total_microbatches = len(data_loader)
+    num_training_steps_per_epoch = int(
+        num_training_steps_per_epoch
+        or math.ceil(total_microbatches / update_freq)
+    )
 
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
@@ -98,8 +102,13 @@ def train_one_epoch(
         samples, targets = batch[0], batch[1]
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
-            continue
+            break
         iteration = start_steps + step
+        window_start = step * update_freq
+        window_size = min(update_freq, total_microbatches - window_start)
+        is_update_step = (data_iter_step + 1 == total_microbatches) or (
+            (data_iter_step + 1) % update_freq == 0
+        )
 
         if data_iter_step % update_freq == 0:
             if lr_schedule_values is not None:
@@ -125,7 +134,9 @@ def train_one_epoch(
         if not math.isfinite(loss_value):
             raise FloatingPointError(f"Loss is not finite: {loss_value}")
 
-        scaled_loss = loss / update_freq
+        # Normalize by the actual window size so a final incomplete
+        # accumulation window has the same mean-gradient semantics.
+        scaled_loss = loss / max(1, window_size)
         if use_amp and device.type == "cuda":
             is_second_order = hasattr(optimizer, "is_second_order") and optimizer.is_second_order
             grad_norm = loss_scaler(
@@ -134,16 +145,16 @@ def train_one_epoch(
                 clip_grad=max_norm,
                 parameters=model.parameters(),
                 create_graph=is_second_order,
-                update_grad=(data_iter_step + 1) % update_freq == 0,
+                update_grad=is_update_step,
             )
-            if (data_iter_step + 1) % update_freq == 0:
+            if is_update_step:
                 optimizer.zero_grad(set_to_none=True)
                 if model_ema is not None:
                     model_ema.update(model)
         else:
             scaled_loss.backward()
             grad_norm = None
-            if (data_iter_step + 1) % update_freq == 0:
+            if is_update_step:
                 if max_norm is not None and max_norm > 0:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()

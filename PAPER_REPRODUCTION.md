@@ -14,6 +14,8 @@ python main.py \
   --dataset flowers102 \
   --data_path /path/to/data \
   --prompt_size 30 \
+  --prompt_type padding \
+  --prompt_output_indices "$(seq -s, 0 101)" \
   --paper_hparams True
 ```
 
@@ -27,6 +29,8 @@ python main.py \
   --backbone resnet50 \
   --weights DEFAULT \
   --conv_adapter_mode conv_parallel \
+  --adapt_size 8 \
+  --adapt_scale 1.0 \
   --dataset flowers102 \
   --data_path /path/to/data
 ```
@@ -101,6 +105,15 @@ python main.py \
   --backbone resnet18 \
   --weights DEFAULT \
   --sidetune_alpha 0.5 \
+  --sidetune_arch lightweight \
+  --sidetune_width 64 \
+  --sidetune_depth 4 \
   --dataset flowers102 \
   --data_path /path/to/data
 ```
+
+## Automated experiment suites
+
+Use `tools.run_hparam_sweep` for matched search spaces and
+`tools.run_ablation_suite` for controlled TRSO component tests. See
+`CORRECTIONS_AND_EXPERIMENTS.md`.

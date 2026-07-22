@@ -35,7 +35,13 @@ def run():
     x = torch.randn(2, 3, 32, 32)
     report = {}
 
-    prompt = VisualPromptingClassifier(resnet18(weights=None, num_classes=1000), 5, prompt_size=2, image_size=32)
+    prompt = VisualPromptingClassifier(
+        resnet18(weights=None, num_classes=1000),
+        5,
+        prompt_size=2,
+        image_size=32,
+        prompt_type="padding",
+    )
     set_trainability_policy(prompt, SimpleNamespace(tuning_method="prompt", weight_decay=1e-4))
     report["visual_prompt"] = step_ok(prompt, x)
 
@@ -66,7 +72,13 @@ def run():
     set_trainability_policy(bitfit, SimpleNamespace(tuning_method="bitfit", bitfit_train_head=True, weight_decay=1e-4))
     report["bitfit"] = step_ok(bitfit, x)
 
-    side = SideTuningClassifier(resnet18(weights=None), num_classes=5)
+    side = SideTuningClassifier(
+        resnet18(weights=None),
+        num_classes=5,
+        side_arch="lightweight",
+        side_width=16,
+        side_depth=4,
+    )
     set_trainability_policy(side, SimpleNamespace(tuning_method="sidetune"))
     report["side_tuning"] = step_ok(side, x)
 

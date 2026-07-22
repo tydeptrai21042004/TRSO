@@ -93,11 +93,11 @@ class BaselineModuleFaithfulnessTest(unittest.TestCase):
         wrapper.train()
         self.assertFalse(wrapper.merged)
 
-    def test_side_tuning_side_is_copied_from_base(self):
+    def test_side_tuning_copy_ablation_is_copied_from_base(self):
         from torchvision.models import resnet18
         base = resnet18(weights=None)
         original = copy.deepcopy(base.state_dict())
-        model = SideTuningClassifier(base_model=base, num_classes=4)
+        model = SideTuningClassifier(base_model=base, num_classes=4, side_arch="copy")
         for key, value in model.side.state_dict().items():
             if key.startswith("fc."):
                 continue

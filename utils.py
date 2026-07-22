@@ -478,80 +478,129 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     assert len(schedule) == epochs * niter_per_ep
     return schedule
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
+def save_model(
+    args,
+    epoch,
+    model,
+    model_without_ddp,
+    optimizer,
+    loss_scaler,
+    model_ema=None,
+    training_state=None,
+):
+    """Save a complete, resumable training checkpoint."""
     output_dir = Path(args.output_dir)
-    epoch_name = str(epoch)
-    checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch_name)]
-    for checkpoint_path in checkpoint_paths:
-        to_save = {
-            'model': model_without_ddp.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-            'scaler': loss_scaler.state_dict(),
-            'args': args,
-        }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / (f"checkpoint-{epoch}.pth")
+    to_save = {
+        "model": model_without_ddp.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "epoch": epoch,
+        "scaler": loss_scaler.state_dict() if loss_scaler is not None else None,
+        "args": args,
+        "training_state": dict(training_state or {}),
+    }
+    if model_ema is not None:
+        to_save["model_ema"] = get_state_dict(model_ema)
+    save_on_master(to_save, checkpoint_path)
 
-        if model_ema is not None:
-            to_save['model_ema'] = get_state_dict(model_ema)
-
-        save_on_master(to_save, checkpoint_path)
-    
     if is_main_process() and isinstance(epoch, int):
         to_del = epoch - args.save_ckpt_num * args.save_ckpt_freq
-        old_ckpt = output_dir / ('checkpoint-%s.pth' % to_del)
-        if os.path.exists(old_ckpt):
-            os.remove(old_ckpt)
+        old_ckpt = output_dir / (f"checkpoint-{to_del}.pth")
+        if old_ckpt.exists():
+            old_ckpt.unlink()
 
 
 def safe_torch_load(path, map_location="cpu"):
-    """Load a trusted checkpoint across PyTorch versions.
-
-    PyTorch 2.6 defaults torch.load to weights_only=True, which can fail for
-    training checkpoints that store argparse.Namespace or NumPy scalars.
-    """
+    """Load a trusted checkpoint across PyTorch versions."""
     try:
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         return torch.load(path, map_location=map_location)
 
 
-def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
-    output_dir = Path(args.output_dir)
-    if args.auto_resume and len(args.resume) == 0:
-        import glob
-        all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*.pth'))
-        latest_ckpt = -1
-        for ckpt in all_checkpoints:
-            t = ckpt.split('-')[-1].split('.')[0]
-            if t.isdigit():
-                latest_ckpt = max(int(t), latest_ckpt)
-        if latest_ckpt >= 0:
-            args.resume = os.path.join(output_dir, 'checkpoint-%d.pth' % latest_ckpt)
-        print("Auto resume checkpoint: %s" % args.resume)
+def resolve_resume_path(args) -> str:
+    """Resolve explicit/automatic resume without mutating model state."""
+    if getattr(args, "auto_resume", False) and not getattr(args, "resume", ""):
+        output_dir = Path(getattr(args, "output_dir", ""))
+        latest_epoch = -1
+        latest_path = ""
+        if output_dir.exists():
+            for checkpoint_path in output_dir.glob("checkpoint-*.pth"):
+                token = checkpoint_path.stem.split("-")[-1]
+                if token.isdigit() and int(token) > latest_epoch:
+                    latest_epoch = int(token)
+                    latest_path = str(checkpoint_path)
+        args.resume = latest_path
+        print(f"Auto resume checkpoint: {args.resume}")
+    return str(getattr(args, "resume", "") or "")
 
-    if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = safe_torch_load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        print("Resume checkpoint %s" % args.resume)
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if not isinstance(checkpoint['epoch'], str): # does not support resuming with 'best', 'best-ema'
-                args.start_epoch = checkpoint['epoch'] + 1
-            else:
-                assert args.eval, 'Does not support resuming with checkpoint-best'
-            if hasattr(args, 'model_ema') and args.model_ema:
-                if 'model_ema' in checkpoint.keys():
-                    model_ema.ema.load_state_dict(checkpoint['model_ema'])
-                else:
-                    model_ema.ema.load_state_dict(checkpoint['model'])
-            if 'scaler' in checkpoint:
-                loss_scaler.load_state_dict(checkpoint['scaler'])
-            print("With optim & sched!")
-    
+
+def load_model_for_resume(args, model_without_ddp, *, strict: bool = True):
+    """Load model state before optimizer construction and return checkpoint."""
+    resume_path = resolve_resume_path(args)
+    if not resume_path:
+        return None
+    if resume_path.startswith("https"):
+        checkpoint = torch.hub.load_state_dict_from_url(
+            resume_path, map_location="cpu", check_hash=True
+        )
+    else:
+        checkpoint = safe_torch_load(resume_path, map_location="cpu")
+    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+        raise RuntimeError(f"Resume checkpoint {resume_path} does not contain a model state")
+    incompat = model_without_ddp.load_state_dict(checkpoint["model"], strict=strict)
+    if not strict and (incompat.missing_keys or incompat.unexpected_keys):
+        raise RuntimeError(
+            "Non-strict resume produced incompatible keys: "
+            f"missing={incompat.missing_keys[:5]}, unexpected={incompat.unexpected_keys[:5]}"
+        )
+    try:
+        from models.task_response_adapter import sync_trso_trainability
+        sync_trso_trainability(model_without_ddp)
+    except ImportError:
+        pass
+    print(f"Resume model checkpoint {resume_path}")
+    return checkpoint
+
+
+def restore_optimizer_state(
+    args,
+    checkpoint,
+    optimizer,
+    loss_scaler,
+    model_ema=None,
+):
+    """Restore optimizer/scaler/EMA after the correct parameter groups exist."""
+    if checkpoint is None:
+        return {}
+    epoch = checkpoint.get("epoch")
+    optimizer_state = checkpoint.get("optimizer")
+    if optimizer_state is not None and optimizer is not None:
+        optimizer.load_state_dict(optimizer_state)
+    if isinstance(epoch, int):
+        args.start_epoch = epoch + 1
+    elif epoch is not None and not getattr(args, "eval", False):
+        raise RuntimeError("checkpoint-best is evaluation-only; resume from a numbered checkpoint")
+    if getattr(args, "model_ema", False) and model_ema is not None:
+        state = checkpoint.get("model_ema", checkpoint["model"])
+        model_ema.ema.load_state_dict(state, strict=True)
+    scaler_state = checkpoint.get("scaler")
+    if scaler_state is not None and loss_scaler is not None:
+        loss_scaler.load_state_dict(scaler_state)
+    print("Restored optimizer/scaler training state")
+    return dict(checkpoint.get("training_state") or {})
+
+
+def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
+    """Backward-compatible combined resume helper.
+
+    New code should call ``load_model_for_resume`` before optimizer construction
+    and ``restore_optimizer_state`` afterwards.
+    """
+    checkpoint = load_model_for_resume(args, model_without_ddp, strict=True)
+    return restore_optimizer_state(args, checkpoint, optimizer, loss_scaler, model_ema)
+
 
 def over_write_args_from_dict(args, dict):
     """

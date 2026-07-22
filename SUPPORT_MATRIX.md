@@ -1,33 +1,35 @@
 # Strict method/backbone support matrix
 
-Unsupported pairings stop before training. Methods are not rewritten for an
-architecture family outside the reproduced configuration.
+Unsupported architecture pairings stop before training. A method is not
+silently rewritten into a different adapter when its required architecture is
+unavailable.
 
-| Method | Supported backbone | Training rule |
+| Method | Supported backbone domain | Trainable state |
 |---|---|---|
 | Full fine-tuning | Any supported classifier | All parameters |
 | Linear probe | Any model with a replaceable task head | Task head only |
-| Visual prompt | Pretrained image classifier with sufficient original outputs | Prompt only; original classifier frozen |
-| Conv-Adapter | ResNet-50 Bottleneck | Conv-Adapter + task head; backbone frozen |
-| BAM | ResNet-50 Bottleneck | End-to-end backbone + BAM + head |
-| Residual Adapter | Dedicated ResNet-26 | Adapter 1x1, task BN, task head |
-| SSF | torchvision ViT, Swin, ConvNeXt | SSF affine parameters + task head |
-| LoRA | ViT, Swin, Transformer | Q/V LoRA + task head |
-| BitFit | Transformer | Biases + task head |
-| Side-Tuning | ResNet | Copied side + alpha + task head; base frozen |
-| TRSO | Recognized CNN, ViT, Swin | Selected TRSO parameters + task head |
+| Visual prompting | Pretrained image classifier with enough original output classes | Prompt only; original classifier frozen |
+| Conv-Adapter | torchvision ResNet-50 bottlenecks | Released reduced grouped adapter + task head |
+| BAM | ResNet-50 bottlenecks | Backbone + BAM + head |
+| Residual Adapter | Dedicated ResNet-26 | Adapter 1x1, task BN and task head |
+| SSF | Supported torchvision ViT, Swin and ConvNeXt operations | SSF affine parameters + task head |
+| LoRA | ViT/Swin/Transformer with identifiable Q/V or packed QKV projections | Q/V LoRA + task head |
+| BitFit | Transformer | Selected biases and optionally task head |
+| Side-Tuning | ResNet | Lightweight side path, alpha and task head; base frozen |
+| TRSO | Recognized CNN, ViT and Swin feature layouts | Selected TRSO ranks/gates + task head |
 
 ## Required strict choices
 
-- `prompt`: keep the pretrained output head. The default fixed mapping is
-  `0,1,...,C-1`; use `--prompt_output_indices` for another fixed mapping.
-- `conv`: use `--backbone resnet50` and choose one of
-  `conv_parallel`, `conv_sequential`, `residual_parallel`, or
-  `residual_sequential`.
+- `prompt`: set `--prompt_output_indices` to the fixed output-label mapping used
+  in the experiment. Mapping estimation must use training data only.
+- `conv`: use `--backbone resnet50` and
+  `--conv_adapter_mode conv_parallel` for the released Design-2/v4 path. Other
+  modes are retained as explicitly named ablations.
 - `bam`: use `--backbone resnet50`.
-- `residual`: supply `--ra_pretrained_checkpoint` for transfer experiments.
-  `--weights none` is accepted only for architecture/tests.
-- `ssf`: use a torchvision `vit_*`, `swin_*`, or `convnext_*` model.
-- `lora`: use a Transformer with identifiable Q/V or packed QKV projections.
+- `residual`: provide `--ra_pretrained_checkpoint` for transfer experiments.
+- `ssf`: use a supported `vit_*`, `swin_*` or `convnext_*` model.
+- `lora`: use a Transformer with identifiable Q/V or QKV projections. Packed
+  torchvision MHA requires `--lora_dropout 0`.
+- `sidetune`: use `--sidetune_arch lightweight` for the primary baseline.
 
 `lora_conv` is deliberately rejected by the strict factory.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import time
@@ -78,6 +79,9 @@ def get_args_parser():
     parser.add_argument("--weights", type=str, default="DEFAULT")
     parser.add_argument("--list_backbones", action="store_true")
     parser.add_argument("--list_compatibility", action="store_true")
+    parser.add_argument("--experiment_suite", type=str, default="", help="Manifest suite metadata.")
+    parser.add_argument("--experiment_name", type=str, default="", help="Ablation or sweep variant metadata.")
+    parser.add_argument("--experiment_run_id", type=str, default="", help="Deterministic manifest run identifier.")
     parser.add_argument("--legacy_auto_hparams", type=str2bool, default=False, help="Opt into the original repository hyperparameter override table.")
     parser.add_argument("--pretrained", type=str2bool, default=None)
     parser.add_argument("--keep_pretrained_head", type=str2bool, default=True)
@@ -103,10 +107,13 @@ def get_args_parser():
     parser.add_argument("--sidetune_alpha", type=float, default=0.5)
     parser.add_argument("--sidetune_learn_alpha", type=str2bool, default=True)
     parser.add_argument("--sidetune_width", type=int, default=64)
-    parser.add_argument("--sidetune_depth", type=int, default=3)
+    parser.add_argument("--sidetune_depth", type=int, default=4)
+    parser.add_argument("--sidetune_arch", type=str, default="lightweight", choices=["lightweight", "copy"])
+    parser.add_argument("--sidetune_checkpoint", type=str, default="", help="Optional distilled/lightweight side-network checkpoint.")
 
     # Prompt / Conv-Adapter
     parser.add_argument("--prompt_size", default=30, type=int)
+    parser.add_argument("--prompt_type", default="padding", choices=["padding", "fixed_patch", "random_patch"])
     parser.add_argument("--prompt_output_indices", default="", type=str, help="Comma-separated fixed pretrained output indices; empty uses 0..C-1.")
     parser.add_argument("--kernel_size", default=3, type=int)
     parser.add_argument("--adapt_size", default=8, type=float)
@@ -130,6 +137,10 @@ def get_args_parser():
     parser.add_argument("--trso_parameter_budget", type=int, default=0, help="Exact global budget for active TRSO coefficients/gates; 0 disables the budget.")
     parser.add_argument("--trso_config", type=str, default="", help="Load a previously calibrated TRSO JSON config.")
     parser.add_argument("--trso_save_config", type=str, default="", help="Optional explicit output path for the calibrated TRSO JSON config.")
+    parser.add_argument("--trso_basis_source", type=str, default="response", choices=["response", "random", "dct"], help="Controlled basis ablation; response is the proposed SVD basis.")
+    parser.add_argument("--trso_allocation", type=str, default="exact", choices=["exact", "greedy", "uniform"], help="Rank-allocation ablation under the same budget.")
+    parser.add_argument("--trso_score_mode", type=str, default="energy", choices=["energy", "energy_per_param", "energy_per_channel", "noise_adjusted"])
+    parser.add_argument("--trso_noise_beta", type=float, default=0.0)
 
     # BAM-Tuning baseline (Q1/IJCV CNN attention module adapted to frozen-backbone PEFT)
     parser.add_argument("--bam_reduction", type=int, default=16)
@@ -158,6 +169,7 @@ def get_args_parser():
     parser.add_argument("--lora_merge_weights", type=str2bool, default=True)
     parser.add_argument("--lora_target", type=str, default="all", choices=["all", "1x1", "3x3", "dw"])
     parser.add_argument("--bitfit_train_head", type=str2bool, default=True)
+    parser.add_argument("--bitfit_bias_scope", type=str, default="all", choices=["all", "transformer", "attention"])
 
     # Batch / epochs
     parser.add_argument("--batch_size", default=64, type=int)
@@ -321,6 +333,8 @@ def canonicalize_args(args):
         raise ValueError("--trso_keep_ratio must be in (0, 1].")
     if args.trso_parameter_budget < 0:
         raise ValueError("--trso_parameter_budget cannot be negative.")
+    if args.trso_noise_beta < 0:
+        raise ValueError("--trso_noise_beta cannot be negative.")
     if not (0.0 < float(args.val_ratio) < 1.0):
         raise ValueError("--val_ratio must be in (0, 1).")
     if args.task in {"multilabel", "regression"} and (args.mixup > 0 or args.cutmix > 0 or args.cutmix_minmax is not None):
@@ -769,6 +783,8 @@ def _add_adapters(model_backbone: nn.Module, args):
             mode=args.conv_adapter_mode,
             kernel_size=args.kernel_size,
             stages=(1, 2, 3, 4),
+            reduction=args.adapt_size,
+            adapt_scale=args.adapt_scale,
         )
         print(f"[Conv-Adapter] inserted {count} adapters using {args.conv_adapter_mode}.")
 
@@ -879,11 +895,12 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
         return model
 
     if method == "bitfit":
-        for name, parameter in model.named_parameters():
-            if name.endswith(".bias"):
-                parameter.requires_grad_(True)
-            if args.bitfit_train_head and _is_head_param(name):
-                parameter.requires_grad_(True)
+        from models.tuning_modules.bitfit import set_bitfit_trainability
+        set_bitfit_trainability(
+            model,
+            train_head=bool(args.bitfit_train_head),
+            bias_scope=getattr(args, "bitfit_bias_scope", "all"),
+        )
         args.weight_decay = 0.0
         return model
 
@@ -1003,6 +1020,12 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
             warmup_opt.zero_grad(set_to_none=True)
             loss = criterion(_classification_logits(model(images)), labels)
             loss.backward()
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                world_size = torch.distributed.get_world_size()
+                for parameter in head_params:
+                    if parameter.grad is not None:
+                        torch.distributed.all_reduce(parameter.grad, op=torch.distributed.ReduceOp.SUM)
+                        parameter.grad.div_(world_size)
             warmup_opt.step()
             warmup_done += 1
         print(f"[TRSO] Completed {warmup_done} head warm-up steps.")
@@ -1037,13 +1060,20 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
 
     score_rows = []
     for name, adapter in adapters:
-        score = adapter.finalize_calibration(init_scale=args.trso_basis_init_scale)
+        score = adapter.finalize_calibration(
+            init_scale=args.trso_basis_init_scale,
+            basis_source=getattr(args, "trso_basis_source", "response"),
+            random_seed=getattr(args, "seed", 0),
+        )
         score_rows.append((name, score))
     selected = select_trso_layers(
         model,
         max_adapters=args.trso_max_adapters,
         keep_ratio=args.trso_keep_ratio,
         parameter_budget=args.trso_parameter_budget,
+        allocation=getattr(args, "trso_allocation", "exact"),
+        score_mode=getattr(args, "trso_score_mode", "energy"),
+        noise_beta=getattr(args, "trso_noise_beta", 0.0),
     )
 
     # Clear any calibration gradients on the classifier and backbone.
@@ -1163,7 +1193,7 @@ def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
         if args.ra_pretrained_checkpoint:
             checkpoint = safe_torch_load(args.ra_pretrained_checkpoint, map_location="cpu")
             state = _extract_checkpoint_model(checkpoint, args.model_key) if isinstance(checkpoint, dict) else checkpoint
-            incompat = model.load_shared_state_dict(state, strict=False)
+            incompat = model.load_shared_state_dict(state, strict=False, require_shared_coverage=True)
             print(f"[Residual Adapter] loaded shared checkpoint; missing={len(incompat.missing_keys)} unexpected={len(incompat.unexpected_keys)}")
         elif str(args.weights).lower() not in {"none", "scratch", "random"}:
             raise ValueError(
@@ -1198,6 +1228,7 @@ def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
             prompt_size=args.prompt_size,
             image_size=args.input_size,
             output_indices=indices,
+            prompt_type=args.prompt_type,
         ), set()
 
     if args.tuning_method == "sidetune":
@@ -1207,6 +1238,10 @@ def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
             num_classes=args.nb_classes,
             learn_alpha=bool(args.sidetune_learn_alpha),
             alpha_init=float(args.sidetune_alpha),
+            side_arch=args.sidetune_arch,
+            side_width=args.sidetune_width,
+            side_depth=args.sidetune_depth,
+            side_checkpoint=args.sidetune_checkpoint,
         )
         model.backbone_family = family
         return model, set()
@@ -1413,8 +1448,17 @@ def main(args):
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
 
 
+    # Load model state before TRSO calibration and before optimizer construction.
+    # This is required because active TRSO ranks determine the trainable parameter set.
+    resume_checkpoint = utils.load_model_for_resume(args, model, strict=True)
+
     if args.tuning_method == "trso":
-        calibrate_trso_model(model, data_loader_train, device, args)
+        if resume_checkpoint is None:
+            calibrate_trso_model(model, data_loader_train, device, args)
+        else:
+            from models.task_response_adapter import sync_trso_trainability
+            selected = sync_trso_trainability(model)
+            print(f"[TRSO] Resume restored {len(selected)} active adapters; calibration skipped.")
 
     # Old approximate memory profile retained for compatibility.
     try:
@@ -1465,7 +1509,9 @@ def main(args):
     print(f"Number of total params: {n_total:,}")
 
     total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
-    num_training_steps_per_epoch = max(1, len(data_loader_train) // max(1, args.update_freq))
+    num_training_steps_per_epoch = max(
+        1, math.ceil(len(data_loader_train) / max(1, args.update_freq))
+    )
     print(f"LR = {args.lr:.8f}")
     print(f"Batch size = {total_batch_size}")
     print(f"Number of training examples = {len(dataset_train)}")
@@ -1512,7 +1558,9 @@ def main(args):
     eval_criterion = build_task_criterion(args, mixup_active=False)
     print(f"criterion = {criterion} | task={args.task_type}")
 
-    utils.auto_load_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
+    restored_training_state = utils.restore_optimizer_state(
+        args, resume_checkpoint, optimizer, loss_scaler, model_ema
+    )
 
     if args.head_from:
         head_ckpt = safe_torch_load(args.head_from, map_location="cpu")
@@ -1550,9 +1598,10 @@ def main(args):
             save_json_on_master(stats, os.path.join(args.output_dir, "eval_summary.json"))
         return
 
-    best_val_metric = float("-inf") if maximize_metric else float("inf")
-    best_epoch = -1
-    history = []
+    default_best = float("-inf") if maximize_metric else float("inf")
+    best_val_metric = float(restored_training_state.get("best_val_metric", default_best))
+    best_epoch = int(restored_training_state.get("best_epoch", -1))
+    history = list(restored_training_state.get("history", []))
     start_time = time.time()
 
     print(f"Start training for {args.epochs} epochs")
@@ -1583,18 +1632,8 @@ def main(args):
             task_type=args.task_type,
         )
 
-        if args.output_dir and args.save_ckpt and ((epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs):
-            utils.save_model(
-                args=args,
-                model=model,
-                model_without_ddp=model_without_ddp,
-                optimizer=optimizer,
-                loss_scaler=loss_scaler,
-                epoch=epoch,
-                model_ema=model_ema,
-            )
-
         val_stats = {}
+        is_better = False
         if data_loader_val is not None:
             val_stats = evaluate(
                 data_loader_val,
@@ -1610,16 +1649,6 @@ def main(args):
             if is_better:
                 best_val_metric = current_metric
                 best_epoch = epoch
-                if args.output_dir and args.save_ckpt:
-                    utils.save_model(
-                        args=args,
-                        model=model,
-                        model_without_ddp=model_without_ddp,
-                        optimizer=optimizer,
-                        loss_scaler=loss_scaler,
-                        epoch="best",
-                        model_ema=model_ema,
-                    )
             best_stats = {metric_name: best_val_metric}
             print(f"Best validation {format_primary(best_stats, args.task_type)} at epoch {best_epoch}")
 
@@ -1640,6 +1669,29 @@ def main(args):
             "maximize_primary_metric": maximize_metric,
         }
         history.append(log_stats)
+
+        checkpoint_training_state = {
+            "best_val_metric": best_val_metric,
+            "best_epoch": best_epoch,
+            "history": history,
+            "primary_metric": metric_name,
+            "maximize_primary_metric": maximize_metric,
+            "global_update_step": (epoch + 1) * num_training_steps_per_epoch,
+        }
+        if args.output_dir and args.save_ckpt and is_better:
+            utils.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp,
+                optimizer=optimizer, loss_scaler=loss_scaler, epoch="best",
+                model_ema=model_ema, training_state=checkpoint_training_state,
+            )
+        if args.output_dir and args.save_ckpt and (
+            (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs
+        ):
+            utils.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp,
+                optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch,
+                model_ema=model_ema, training_state=checkpoint_training_state,
+            )
 
         if args.output_dir and utils.is_main_process():
             if log_writer is not None:
@@ -1706,15 +1758,18 @@ def main(args):
     # Final test: restore the best validation checkpoint and evaluate once.
     if data_loader_test is not None:
         best_ckpt = os.path.join(args.output_dir, "checkpoint-best.pth") if args.output_dir else ""
-        if best_ckpt and os.path.exists(best_ckpt):
-            try:
-                ckpt = safe_torch_load(best_ckpt, map_location="cpu")
-                state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-                model_without_ddp.load_state_dict(state, strict=False)
-                print(f"[Info] Loaded best checkpoint for final test: {best_ckpt}")
-            except Exception as exc:
-                print(f"[Warn] Failed to reload best checkpoint ({best_ckpt}): {exc}")
-                print("[Warn] Continuing final test with the current in-memory model.")
+        if not best_ckpt or not os.path.exists(best_ckpt):
+            raise FileNotFoundError(
+                "Final test requires checkpoint-best.pth produced by validation selection."
+            )
+        ckpt = safe_torch_load(best_ckpt, map_location="cpu")
+        if not isinstance(ckpt, dict) or "model" not in ckpt:
+            raise RuntimeError(f"Best checkpoint is malformed: {best_ckpt}")
+        model_without_ddp.load_state_dict(ckpt["model"], strict=True)
+        if args.tuning_method == "trso":
+            from models.task_response_adapter import sync_trso_trainability
+            sync_trso_trainability(model_without_ddp)
+        print(f"[Info] Strictly loaded best checkpoint for final test: {best_ckpt}")
         test_stats = evaluate(
             data_loader_test,
             model,

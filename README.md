@@ -11,7 +11,7 @@
 Scientific TRSO is intentionally based on three components only:
 
 1. **aligned task-response measurement** using the same depthwise operator in calibration and training;
-2. **optimal low-rank channel--spatial projection** by truncated SVD;
+2. **exact rank-constrained local projection** by truncated SVD;
 3. **exact layer-and-rank allocation** under a global trainable-parameter budget.
 
 The method does not use a random channel bottleneck, GELU inside the proposal operator, a hand-designed dilation bank, a router, frequency branches, or a collection of auxiliary losses.
@@ -22,7 +22,7 @@ It supports:
 - Vision Transformer tokens in `B x N x C` format;
 - Swin-style tensors in `B x H x W x C` format.
 
-Class and prefix tokens are preserved exactly.
+Spatial filtering preserves prefix tokens exactly. Automatic token-grid inference supports zero, one or two prefix tokens on square grids; rectangular grids must be supplied explicitly by backbone metadata.
 
 ## Framework support extension
 
@@ -295,7 +295,11 @@ python main.py \
 | `--trso_basis_init_scale` | Frobenius norm of the initial SVD update | `0.05` |
 | `--trso_basis_trainable` | Refine spatial atoms while preserving factorized rank | `False` |
 | `--trso_calibration_batches` | Mini-batches used to estimate task response | `8` |
-| `--trso_head_warmup_steps` | Optional shared-head preparation | `0` |
+| `--trso_basis_source` | Proposed response basis or controlled `random`/`dct` basis | `response` |
+| `--trso_allocation` | `exact`, `greedy`, or `uniform` rank allocation | `exact` |
+| `--trso_score_mode` | Layer value: energy, per-parameter, per-channel, or noise-adjusted | `energy` |
+| `--trso_noise_beta` | Penalty coefficient for noise-adjusted response value | `0.0` |
+| `--trso_head_warmup_steps` | Optional synchronized shared-head preparation | `0` |
 | `--trso_keep_ratio` | Maximum retained layer fraction | `1.0` |
 | `--trso_max_adapters` | Maximum number of adapted layers | `0` |
 | `--trso_parameter_budget` | Exact global adapter budget | `0` |
@@ -367,4 +371,33 @@ python main.py \
 `lora` is restricted to Transformer Q/V attention projections. The former
 `lora_conv` control is excluded from strict paper-reproduction runs because it
 is not the original LoRA method.
+
+## 12. Corrected release workflow
+
+The current release includes corrected baseline graphs, strict checkpoint
+resumption, partial gradient-accumulation handling, **85 automated tests**,
+method-compatible hyperparameter sweeps and a controlled TRSO ablation suite.
+
+```bash
+# All tests
+./scripts/test_all.sh
+
+# Baseline fidelity tests only
+./scripts/test_all_baselines.sh
+
+# Plan an ablation suite; add --execute to run
+python -m tools.run_ablation_suite \
+  --dataset fake --weights none --device cpu --epochs 1 --seeds 0 --max_runs 3
+
+# Plan a baseline hyperparameter sweep
+python -m tools.run_hparam_sweep \
+  --method lora --dataset fake --weights none --device cpu --epochs 1 --seeds 0 --max_runs 3
+
+# Aggregate completed runs
+python -m tools.aggregate_revision_results \
+  --root outputs_ablation --out_csv experiments/ablation_results.csv
+```
+
+See `CORRECTIONS_AND_EXPERIMENTS.md` for the full correction log, ablation
+rationale, sweep spaces and fair-comparison checklist.
 

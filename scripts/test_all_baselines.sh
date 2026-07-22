@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python -m unittest tests.test_baseline_modules
-python -m unittest tests.test_baseline_integration
+python -m pytest -q \
+  tests/test_baseline_modules.py \
+  tests/test_baseline_integration.py \
+  tests/test_corrected_baseline_fidelity.py

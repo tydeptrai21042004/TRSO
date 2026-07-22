@@ -1,50 +1,72 @@
-# Strict baseline reproduction policy
+# Baseline fidelity and reproduction boundary
 
-This repository separates **paper reproductions** from the TRSO proposal. A
-method is exposed under a paper name only when the active model factory follows
-the publication's computational graph, insertion locations, initialization,
-and trainability rule for the supported backbone.
+This repository separates three claims that are often incorrectly combined:
 
-## Reproduced baselines
+1. **Method-graph fidelity** — the active module follows the released/published computation graph.
+2. **Protocol fidelity** — the data split, preprocessing, optimizer, schedule, checkpoint and label mapping match a paper.
+3. **Numerical reproduction** — the reported paper result is reproduced within an explicitly stated tolerance.
 
-| CLI method | Reproduced method | Strict supported configuration |
+The corrected code targets method-graph fidelity. Numerical reproduction still
+requires the original assets and protocol for each paper.
+
+## Corrected active baselines
+
+| CLI method | Active implementation | Enforced boundary |
 |---|---|---|
-| `prompt` | Exploring Visual Prompts for Adapting Large-Scale Models | Frozen pretrained image classifier, padding prompt, fixed output-label mapping, no new task head |
-| `conv` / `adapter` | Conv-Adapter | ResNet-50 Bottleneck, depthwise + pointwise adapter, learnable channel scaling, four published insertion schemes |
-| `bam` | Bottleneck Attention Module | End-to-end ResNet-50 with BAM after layer1/layer2/layer3; two dilated spatial convolutions |
-| `residual` | Residual Adapters | Dedicated reduced-resolution ResNet-26, task-specific BN, series or parallel 1x1 adapters |
-| `ssf` | Scaling & Shifting Your Features | torchvision ViT, Swin, or ConvNeXt with SSF after the internal operations specified by the paper |
-| `lora` | LoRA | Transformer Q/V projections, alpha/r scaling, Kaiming A, zero B, merge/unmerge |
-| `bitfit` | BitFit | Transformer biases plus downstream task head |
-| `sidetune` | Side-Tuning | ResNet frozen base plus a copied, trainable side network and learned mixture coefficient |
+| `full` | Full fine-tuning | All model parameters and the task head are trainable |
+| `linear` | Linear probe | Backbone frozen; task head trainable |
+| `prompt` | Visual prompting | Frozen pretrained classifier; padding, fixed-patch or random-patch prompt; fixed output-label map; no replacement task classifier |
+| `conv` / `adapter` | Conv-Adapter Design-2/v4 path | ResNet-50 bottleneck; reduced grouped spatial adapter from the bottleneck intermediate activation; pointwise projection and channel scale |
+| `bam` | Bottleneck Attention Module | ResNet-50 stage bottlenecks; end-to-end BAM training, not falsely labeled frozen-backbone PEFT |
+| `residual` | Residual Adapters | Dedicated reduced-resolution ResNet-26; official option-A shortcut; task BN; parallel or series 1x1 adapters; strict shared-checkpoint coverage |
+| `ssf` | Scaling and Shifting Features | SSF inside supported ViT/Swin/ConvNeXt operations; merge/export function with numerical-equivalence test |
+| `lora` | Transformer LoRA | Q/V low-rank updates, alpha/r scaling, zero-update initialization and merge/unmerge; unsupported packed-MHA dropout is rejected |
+| `bitfit` | BitFit-style bias tuning | Explicit `all`, `transformer`, or `attention` bias scope and explicit task-head policy |
+| `sidetune` | Side-Tuning | Frozen ResNet base plus a lightweight trainable side network and learned mixture; full-copy side is retained only as a labeled high-capacity ablation |
+| `trso` | Proposed method | Task-response, random or DCT basis controls; exact, greedy or uniform allocation controls |
 
-`full` and `linear` remain standard controls.
+## Important protocol notes
 
-## Explicitly excluded
+### Visual prompting
 
-`lora_conv` is not exposed as an original LoRA baseline. The old convolutional
-low-rank module remains only as historical source code and is unreachable from
-the strict experiment factory.
+The code keeps the original classifier frozen. For a strict experiment, provide
+a training-derived and then fixed output-label mapping through
+`--prompt_output_indices`. The default identity map is only a deterministic
+fallback and must not be presented as the paper's mapping unless that is truly
+the selected protocol.
 
-The former hook-based approximations for BAM, SSF, Conv-Adapter, residual
-adapters, and Side-Tuning have been removed from the active path.
+### Residual adapters
 
-## Reproduction boundary
+Transfer experiments require `--ra_pretrained_checkpoint`. The loader validates
+that every expected shared convolution filter is present. `--weights none` is
+accepted only for architecture tests and synthetic smoke runs.
 
-The code reproduces the **method definition** for the configurations above.
-Reproducing a paper's reported number additionally requires the exact paper
-checkpoint, dataset split, preprocessing, optimizer grid, and random seeds.
-Where a method requires a nonstandard pretrained model, the factory requires an
-explicit checkpoint rather than silently substituting another backbone.
+### SSF
 
-## Primary references
+`merge_ssf_` folds trained SSF affine parameters into supported base operations.
+The test suite requires merged and unmerged logits to agree numerically.
 
-- Bahng et al., *Exploring Visual Prompts for Adapting Large-Scale Models*, ECCV 2022, arXiv:2203.17274.
-- Chen et al., *Conv-Adapter: Exploring Parameter Efficient Transfer Learning for ConvNets*, arXiv:2208.07463 / CVPRW 2024.
-- Park et al., *BAM: Bottleneck Attention Module*, BMVC 2018, arXiv:1807.06514.
-- Rebuffi et al., *Learning Multiple Visual Domains with Residual Adapters*, NeurIPS 2017, arXiv:1705.08045.
-- Rebuffi et al., *Efficient Parametrization of Multi-domain Deep Neural Networks*, CVPR 2018, arXiv:1803.10082.
-- Lian et al., *Scaling & Shifting Your Features: A New Baseline for Efficient Model Tuning*, NeurIPS 2022, arXiv:2210.08823.
-- Hu et al., *LoRA: Low-Rank Adaptation of Large Language Models*, ICLR 2022, arXiv:2106.09685.
-- Zaken et al., *BitFit: Simple Parameter-efficient Fine-tuning for Transformer-based Masked Language-models*, ACL 2022, arXiv:2106.10199.
-- Zhang et al., *Side-Tuning: A Baseline for Network Adaptation via Additive Side Networks*, ECCV 2020, arXiv:1912.13503.
+### Side-Tuning
+
+`--sidetune_arch lightweight` is the default paper-oriented path.
+`--sidetune_arch copy` is intentionally labeled as a high-capacity ablation and
+must be reported with its trainable-parameter and compute cost.
+
+## Excluded misleading names
+
+`lora_conv` is not exposed as original LoRA. Historical convolutional low-rank
+source code is not part of strict baseline experiments.
+
+## Reproduction requirement
+
+A baseline should be called a **numerical paper reproduction** only after the
+following are recorded and matched:
+
+- original pretrained checkpoint and checksum;
+- exact train/validation/test split;
+- image normalization, resizing and augmentation;
+- optimizer, scheduler, epochs and warm-up;
+- classifier and label-map initialization;
+- random seeds and number of runs;
+- parameter-count definition;
+- validation model-selection rule.

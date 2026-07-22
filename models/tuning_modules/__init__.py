@@ -1,8 +1,14 @@
 """Paper-reproduction tuning modules."""
-from .prompter import PadPrompter, VisualPromptingClassifier
+from .prompter import (
+    FixedPatchPrompter,
+    PadPrompter,
+    RandomPatchPrompter,
+    VisualPromptingClassifier,
+    build_prompter,
+)
 from .conv_adapter import ConvAdapter, ConvAdapterBottleneck, apply_conv_adapter_resnet50
 from .program_module import ProgramModule
-from .ssf import SSF, SSFPost, SSFMultiheadAttention, apply_ssf
+from .ssf import SSF, SSFPost, SSFMultiheadAttention, apply_ssf, merge_ssf_
 from .bam_adapter import BAM, BAMAdapter, BAMResNet50
 from .lora_transformer import (
     LoRALinear,
@@ -11,7 +17,8 @@ from .lora_transformer import (
     apply_lora_transformer,
 )
 from .residual_adapter import ResidualAdapterResNet26
-from .side_tuning import SideTuningClassifier
+from .side_tuning import ConvSideNetwork, SideTuningClassifier
+from .bitfit import set_bitfit_trainability
 
 
 def set_tuning_config(tuning_method, args):
@@ -27,18 +34,27 @@ def set_tuning_config(tuning_method, args):
     }
     method = aliases.get(method, method)
     if method == "prompt":
-        return {"method": method, "prompt_size": getattr(args, "prompt_size", 30)}
+        return {
+            "method": method,
+            "prompt_size": getattr(args, "prompt_size", 30),
+            "prompt_type": getattr(args, "prompt_type", "padding"),
+        }
     if method == "conv":
         return {
             "method": method,
             "kernel_size": getattr(args, "kernel_size", 3),
             "mode": getattr(args, "conv_adapter_mode", "conv_parallel"),
+            "width": getattr(args, "adapt_size", 8),
+            "scale": getattr(args, "adapt_scale", 1.0),
         }
     if method == "trso":
         return {
             "method": method,
             "kernel_size": getattr(args, "trso_kernel_size", 5),
             "spatial_rank": getattr(args, "trso_spatial_rank", 2),
+            "basis_source": getattr(args, "trso_basis_source", "response"),
+            "allocation": getattr(args, "trso_allocation", "exact"),
+            "score_mode": getattr(args, "trso_score_mode", "energy"),
         }
     if method == "bam":
         return {"method": method, "reduction": getattr(args, "bam_reduction", 16), "dilation": getattr(args, "bam_dilation", 4)}
@@ -49,8 +65,20 @@ def set_tuning_config(tuning_method, args):
     if method == "lora":
         return {"method": method, "rank": getattr(args, "lora_r", 8), "alpha": getattr(args, "lora_alpha", 16.0)}
     if method == "sidetune":
-        return {"method": method, "alpha": getattr(args, "sidetune_alpha", 0.5)}
-    if method in {"full", "linear", "bitfit"}:
+        return {
+            "method": method,
+            "alpha": getattr(args, "sidetune_alpha", 0.5),
+            "side_arch": getattr(args, "sidetune_arch", "lightweight"),
+            "side_width": getattr(args, "sidetune_width", 64),
+            "side_depth": getattr(args, "sidetune_depth", 4),
+        }
+    if method == "bitfit":
+        return {
+            "method": method,
+            "bias_scope": getattr(args, "bitfit_bias_scope", "all"),
+            "train_head": getattr(args, "bitfit_train_head", True),
+        }
+    if method in {"full", "linear"}:
         return {"method": method}
     if method in {"lora_conv", "lora_conv2d"}:
         raise NotImplementedError(

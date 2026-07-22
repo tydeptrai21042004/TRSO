@@ -289,6 +289,76 @@ def set_ssf_trainability(model: nn.Module) -> None:
             parameter.requires_grad_(True)
 
 
+@torch.no_grad()
+def _merge_affine_post(wrapper: SSFPost) -> nn.Module:
+    """Fold one SSFPost transform into its frozen affine base operation."""
+    base = wrapper.base
+    scale = wrapper.ssf_scale.detach()
+    shift = wrapper.ssf_shift.detach()
+    if isinstance(base, nn.Linear):
+        base.weight.mul_(scale[:, None])
+    elif isinstance(base, nn.Conv2d):
+        base.weight.mul_(scale[:, None, None, None])
+    elif isinstance(base, nn.LayerNorm) or hasattr(base, "normalized_shape"):
+        if getattr(base, "weight", None) is None:
+            base.weight = nn.Parameter(scale.clone(), requires_grad=False)
+        else:
+            base.weight.mul_(scale)
+    else:
+        raise TypeError(f"Cannot merge SSF into {type(base).__name__}")
+
+    bias = getattr(base, "bias", None)
+    if bias is None:
+        base.bias = nn.Parameter(shift.clone(), requires_grad=False)
+    else:
+        bias.mul_(scale).add_(shift)
+    for parameter in base.parameters():
+        parameter.requires_grad_(False)
+    return base
+
+
+@torch.no_grad()
+def _merge_attention(wrapper: SSFMultiheadAttention) -> nn.MultiheadAttention:
+    base = wrapper.base
+    base.in_proj_weight.mul_(wrapper.qkv_scale.detach()[:, None])
+    if base.in_proj_bias is None:
+        base.in_proj_bias = nn.Parameter(wrapper.qkv_shift.detach().clone(), requires_grad=False)
+    else:
+        base.in_proj_bias.mul_(wrapper.qkv_scale.detach()).add_(wrapper.qkv_shift.detach())
+    base.out_proj.weight.mul_(wrapper.proj_scale.detach()[:, None])
+    if base.out_proj.bias is None:
+        base.out_proj.bias = nn.Parameter(wrapper.proj_shift.detach().clone(), requires_grad=False)
+    else:
+        base.out_proj.bias.mul_(wrapper.proj_scale.detach()).add_(wrapper.proj_shift.detach())
+    for parameter in base.parameters():
+        parameter.requires_grad_(False)
+    return base
+
+
+def merge_ssf_(model: nn.Module) -> List[str]:
+    """Merge all SSF transforms in-place and remove their wrappers.
+
+    The returned model has ordinary Linear/Conv/LayerNorm/MHA modules and is
+    numerically equivalent in evaluation mode. The list contains merged paths.
+    """
+    records: List[str] = []
+
+    def visit(parent: nn.Module, prefix: str = "") -> None:
+        for name, child in list(parent.named_children()):
+            path = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, SSFPost):
+                setattr(parent, name, _merge_affine_post(child))
+                records.append(path)
+            elif isinstance(child, SSFMultiheadAttention):
+                setattr(parent, name, _merge_attention(child))
+                records.append(path)
+            else:
+                visit(child, path)
+
+    visit(model)
+    return records
+
+
 # Legacy name retained for tests/imports; this is an individual SSF transform,
 # not the complete baseline. New runs use apply_ssf().
 class SSF(nn.Module):
@@ -309,5 +379,5 @@ class SSF(nn.Module):
 
 
 __all__ = [
-    "SSF", "SSFPost", "SSFMultiheadAttention", "ssf_ada", "apply_ssf", "set_ssf_trainability"
+    "SSF", "SSFPost", "SSFMultiheadAttention", "ssf_ada", "apply_ssf", "set_ssf_trainability", "merge_ssf_"
 ]

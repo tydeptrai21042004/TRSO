@@ -104,6 +104,8 @@ class LoRAQKVLinear(_LoRAMixin, nn.Module):
         super().__init__()
         if base.out_features % 3:
             raise ValueError("Packed qkv output dimension must be divisible by three")
+        if rank <= 0:
+            raise ValueError("LoRA rank must be positive")
         self.base = base
         self.embed_dim = base.out_features // 3
         self.rank = int(rank)
@@ -178,6 +180,13 @@ class LoRAMultiheadAttention(_LoRAMixin, nn.Module):
         super().__init__()
         if base.in_proj_weight is None:
             raise ValueError("Packed in_proj_weight is required")
+        if rank <= 0:
+            raise ValueError("LoRA rank must be positive")
+        if float(dropout) != 0.0:
+            raise ValueError(
+                "Packed nn.MultiheadAttention supports exact Q/V LoRA only with dropout=0. "
+                "Use a backbone with explicit qkv Linear projections for LoRA dropout."
+            )
         self.base = base
         self.rank = int(rank)
         self.alpha = float(alpha)
@@ -294,8 +303,16 @@ def mark_only_lora_as_trainable(model: nn.Module, train_bias: str = "none") -> N
                 parameter.requires_grad_(True)
     elif train_bias == "lora_only":
         for module in model.modules():
-            if isinstance(module, (LoRALinear, LoRAQKVLinear, LoRAMultiheadAttention)) and module.base.bias is not None:
-                module.base.bias.requires_grad_(True)
+            if isinstance(module, (LoRALinear, LoRAQKVLinear)):
+                if module.base.bias is not None:
+                    module.base.bias.requires_grad_(True)
+            elif isinstance(module, LoRAMultiheadAttention):
+                if module.base.in_proj_bias is not None:
+                    module.base.in_proj_bias.requires_grad_(True)
+                if module.base.out_proj.bias is not None:
+                    module.base.out_proj.bias.requires_grad_(True)
+    elif train_bias != "none":
+        raise ValueError("train_bias must be none, all, or lora_only")
 
 
 __all__ = [

@@ -1,13 +1,13 @@
-"""Residual Adapters in the original reduced-resolution ResNet-26 domain.
+"""Residual Adapters in the official reduced-resolution ResNet-26 domain.
 
-This is a single-task extraction of the official multi-domain architecture by
-Rebuffi, Bilen, and Vedaldi. Shared 3x3 convolutions are frozen during transfer;
-task-specific BatchNorm, 1x1 residual adapters, and the task classifier are
-trained. Both published series and parallel parameterizations are available.
+This module is a single-task extraction of Rebuffi et al.'s released model. It
+preserves the official ResNet-26 stem, [4,4,4] blocks, option-A shortcuts,
+parallel/series adapter ordering, task-specific BatchNorm and classifier.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, Iterator, Mapping, Optional, Sequence
+from dataclasses import dataclass
+from typing import Dict, Iterator, Mapping
 
 import torch
 import torch.nn as nn
@@ -15,12 +15,12 @@ import torch.nn.functional as F
 
 
 class SeriesAdapter(nn.Module):
-    """Published series residual mapping: y = x + A(BN(x))."""
+    """Official series adapter: ``x + Conv1x1(BN(x))``."""
 
     def __init__(self, channels: int) -> None:
         super().__init__()
-        self.bn = nn.BatchNorm2d(channels)
-        self.conv = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(int(channels))
+        self.conv = nn.Conv2d(int(channels), int(channels), kernel_size=1, bias=False)
         self.conv.is_residual_adapter = True
         nn.init.zeros_(self.conv.weight)
         self.is_residual_adapter = True
@@ -30,51 +30,36 @@ class SeriesAdapter(nn.Module):
 
 
 class ConvTask(nn.Module):
-    """Shared 3x3 convolution with task BN and optional residual adapter."""
+    """Shared 3x3 convolution plus one task-specific adapter/BatchNorm path."""
 
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        stride: int = 1,
-        mode: str = "parallel",
-    ) -> None:
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1, mode: str = "parallel") -> None:
         super().__init__()
         mode = str(mode).lower()
         if mode not in {"parallel", "series"}:
             raise ValueError(f"Unknown residual-adapter mode: {mode}")
         self.mode = mode
         self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=False,
+            int(in_channels), int(out_channels), kernel_size=3, stride=int(stride), padding=1, bias=False
         )
-        self.bn = nn.BatchNorm2d(out_channels)
         if mode == "parallel":
             self.adapter = nn.Conv2d(
-                in_channels,
-                out_channels,
-                kernel_size=1,
-                stride=stride,
-                bias=False,
+                int(in_channels), int(out_channels), kernel_size=1, stride=int(stride), bias=False
             )
             self.adapter.is_residual_adapter = True
             nn.init.zeros_(self.adapter.weight)
         else:
-            self.adapter = SeriesAdapter(out_channels)
+            self.adapter = SeriesAdapter(int(out_channels))
+        # In the official series path, SeriesAdapter is applied before this BN.
+        self.bn = nn.BatchNorm2d(int(out_channels))
         self.is_residual_adapter = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.conv(x)
         if self.mode == "parallel":
             y = y + self.adapter(x)
-        y = self.bn(y)
-        if self.mode == "series":
+        else:
             y = self.adapter(y)
-        return y
+        return self.bn(y)
 
 
 class ResidualAdapterBasicBlock(nn.Module):
@@ -83,8 +68,9 @@ class ResidualAdapterBasicBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int, mode: str) -> None:
         super().__init__()
         self.conv1 = ConvTask(in_channels, out_channels, stride=stride, mode=mode)
-        self.relu = nn.ReLU(inplace=True)
+        # Official code applies ReLU immediately before the second ConvTask.
         self.conv2 = ConvTask(out_channels, out_channels, stride=1, mode=mode)
+        self.relu = nn.ReLU(inplace=True)
         self.stride = int(stride)
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
@@ -92,35 +78,36 @@ class ResidualAdapterBasicBlock(nn.Module):
     def _shortcut(self, x: torch.Tensor) -> torch.Tensor:
         if self.stride != 1:
             x = F.avg_pool2d(x, kernel_size=2, stride=self.stride)
-        channel_delta = self.out_channels - x.shape[1]
-        if channel_delta < 0:
-            raise RuntimeError("ResidualAdapterBasicBlock does not support channel reduction")
-        if channel_delta:
-            left = channel_delta // 2
-            right = channel_delta - left
-            x = torch.cat(
-                (
-                    x.new_zeros(x.shape[0], left, x.shape[2], x.shape[3]),
-                    x,
-                    x.new_zeros(x.shape[0], right, x.shape[2], x.shape[3]),
-                ),
-                dim=1,
+        if self.out_channels == x.shape[1]:
+            return x
+        if self.out_channels != 2 * x.shape[1]:
+            raise RuntimeError(
+                "Official Residual-Adapter option-A shortcut expects unchanged or doubled channels"
             )
-        return x
+        # Exact released code: concatenate the downsampled tensor with zeros.
+        return torch.cat((x, torch.zeros_like(x)), dim=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = self._shortcut(x)
-        y = self.relu(self.conv1(x))
-        y = self.conv2(y)
+        y = self.conv1(x)
+        y = self.conv2(self.relu(y))
         return self.relu(y + residual)
 
 
-class ResidualAdapterResNet26(nn.Module):
-    """Official 26-layer reduced-resolution residual-adapter backbone.
+@dataclass(frozen=True)
+class SharedCheckpointCoverage:
+    loaded_shared: int
+    expected_shared: int
+    missing_shared: tuple[str, ...]
+    unexpected: tuple[str, ...]
 
-    Stem: 3x3, 32 channels. Stages: [4,4,4] BasicBlocks with channels
-    [64,128,256], with stride 2 at the beginning of each stage.
-    """
+    @property
+    def complete(self) -> bool:
+        return not self.missing_shared
+
+
+class ResidualAdapterResNet26(nn.Module):
+    """Official 26-layer reduced-resolution residual-adapter backbone."""
 
     def __init__(self, num_classes: int, mode: str = "parallel") -> None:
         super().__init__()
@@ -128,24 +115,36 @@ class ResidualAdapterResNet26(nn.Module):
         if mode not in {"parallel", "series"}:
             raise ValueError("mode must be 'parallel' or 'series'")
         self.mode = mode
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.relu = nn.ReLU(inplace=True)
+        # Official stem is ConvTask without an immediate ReLU.
+        self.pre_layers_conv = ConvTask(3, 32, stride=1, mode=mode)
         self.in_channels = 32
         self.layer1 = self._make_layer(64, blocks=4, stride=2)
         self.layer2 = self._make_layer(128, blocks=4, stride=2)
         self.layer3 = self._make_layer(256, blocks=4, stride=2)
         self.final_bn = nn.BatchNorm2d(256)
+        self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(256, int(num_classes))
         self.backbone_family = "resnet"
         self._initialize()
+        self.last_checkpoint_coverage: SharedCheckpointCoverage | None = None
+
+    @property
+    def conv1(self):
+        """Compatibility view of the shared stem convolution."""
+        return self.pre_layers_conv.conv
+
+    @property
+    def bn1(self):
+        return self.pre_layers_conv.bn
 
     def _make_layer(self, channels: int, blocks: int, stride: int) -> nn.Sequential:
         modules = [ResidualAdapterBasicBlock(self.in_channels, channels, stride, self.mode)]
         self.in_channels = channels
-        for _ in range(1, int(blocks)):
-            modules.append(ResidualAdapterBasicBlock(self.in_channels, channels, 1, self.mode))
+        modules.extend(
+            ResidualAdapterBasicBlock(self.in_channels, channels, 1, self.mode)
+            for _ in range(1, int(blocks))
+        )
         return nn.Sequential(*modules)
 
     def _initialize(self) -> None:
@@ -153,7 +152,8 @@ class ResidualAdapterResNet26(nn.Module):
             if isinstance(module, nn.Conv2d):
                 if getattr(module, "is_residual_adapter", False):
                     continue
-                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+                n = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+                nn.init.normal_(module.weight, 0.0, (2.0 / n) ** 0.5)
             elif isinstance(module, nn.BatchNorm2d):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
@@ -162,7 +162,7 @@ class ResidualAdapterResNet26(nn.Module):
                 nn.init.zeros_(module.bias)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.pre_layers_conv(x)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -172,23 +172,68 @@ class ResidualAdapterResNet26(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(self.forward_features(x))
 
-    def load_shared_state_dict(self, state_dict: Mapping[str, torch.Tensor], strict: bool = False):
-        """Load a pretrained official/shared checkpoint.
-
-        Adapter, task-BN, and classifier keys may be absent. Common wrapper
-        prefixes are stripped to support official checkpoint layouts.
-        """
-        cleaned: Dict[str, torch.Tensor] = {}
-        for key, value in state_dict.items():
+    @staticmethod
+    def _strip_prefix(key: str) -> str:
+        changed = True
+        while changed:
+            changed = False
             for prefix in ("module.", "model.", "backbone."):
                 if key.startswith(prefix):
-                    key = key[len(prefix):]
-            cleaned[key] = value
-        return self.load_state_dict(cleaned, strict=strict)
+                    key = key[len(prefix) :]
+                    changed = True
+        return key
+
+    def _map_official_key(self, key: str) -> str:
+        key = self._strip_prefix(key)
+        key = key.replace("linears.0.", "fc.")
+        key = key.replace("end_bns.0.0.", "final_bn.")
+        key = key.replace(".parallel_conv.0.conv.", ".adapter.")
+        key = key.replace(".bns.0.", ".bn.")
+        # Official series: bns.0.0.conv.0(BN), bns.0.0.conv.1(1x1), bns.0.1(final BN)
+        key = key.replace(".bn.0.conv.0.", ".adapter.bn.")
+        key = key.replace(".bn.0.conv.1.", ".adapter.conv.")
+        key = key.replace(".bn.1.", ".bn.")
+        return key
+
+    def shared_parameter_keys(self) -> set[str]:
+        return {name for name, _ in self.named_parameters() if name.endswith("conv.weight") and ".adapter." not in name}
+
+    def load_shared_state_dict(
+        self,
+        state_dict: Mapping[str, torch.Tensor],
+        strict: bool = False,
+        require_shared_coverage: bool = True,
+    ):
+        """Load official/shared weights and verify all shared 3x3 filters were found."""
+        model_state = self.state_dict()
+        cleaned: Dict[str, torch.Tensor] = {}
+        for raw_key, value in state_dict.items():
+            key = self._map_official_key(raw_key)
+            if key in model_state and hasattr(value, "shape") and value.shape == model_state[key].shape:
+                cleaned[key] = value
+
+        incompat = self.load_state_dict(cleaned, strict=strict)
+        expected = self.shared_parameter_keys()
+        loaded = expected.intersection(cleaned)
+        missing = tuple(sorted(expected - loaded))
+        coverage = SharedCheckpointCoverage(
+            loaded_shared=len(loaded),
+            expected_shared=len(expected),
+            missing_shared=missing,
+            unexpected=tuple(sorted(incompat.unexpected_keys)),
+        )
+        self.last_checkpoint_coverage = coverage
+        if require_shared_coverage and missing:
+            preview = ", ".join(missing[:5])
+            raise RuntimeError(
+                f"Residual-Adapter checkpoint covers {len(loaded)}/{len(expected)} shared filters; "
+                f"missing: {preview}{' ...' if len(missing) > 5 else ''}"
+            )
+        return incompat
 
 
 def set_residual_adapter_trainability(model: ResidualAdapterResNet26) -> None:
-    """Freeze shared filters and train task-specific BN/adapters/head."""
+    """Freeze shared filters; train task BN, adapters and classifier."""
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     for module in model.modules():
@@ -206,21 +251,17 @@ def set_residual_adapter_trainability(model: ResidualAdapterResNet26) -> None:
 
 
 def residual_adapter_trainable_parameters(module: nn.Module) -> Iterator[nn.Parameter]:
-    for parameter in module.parameters():
-        if parameter.requires_grad:
-            yield parameter
+    yield from (parameter for parameter in module.parameters() if parameter.requires_grad)
 
 
-# Legacy names retained only for import compatibility. The old arbitrary
-# torchvision BasicBlock wrappers are intentionally removed from strict mode.
 ParallelResidualAdapter = ResidualAdapterResNet26
 SeriesResidualAdapter = ResidualAdapterResNet26
 
 
 def attach_residual_adapters_resnet(*args, **kwargs):
     raise RuntimeError(
-        "Strict paper reproduction no longer wraps arbitrary torchvision ResNets. "
-        "Build ResidualAdapterResNet26(mode='parallel'|'series') instead."
+        "Strict reproduction uses ResidualAdapterResNet26(mode='parallel'|'series'), "
+        "not arbitrary torchvision ResNet wrappers."
     )
 
 
@@ -229,6 +270,7 @@ __all__ = [
     "ConvTask",
     "ResidualAdapterBasicBlock",
     "ResidualAdapterResNet26",
+    "SharedCheckpointCoverage",
     "set_residual_adapter_trainability",
     "residual_adapter_trainable_parameters",
     "ParallelResidualAdapter",

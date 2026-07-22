@@ -66,11 +66,12 @@ def _infer_token_grid(n_tokens: int, requested: Optional[Tuple[int, int]]) -> Tu
     side = int(math.isqrt(n_tokens))
     if side * side == n_tokens:
         return (side, side), 0
-    if n_tokens > 1:
-        patch_tokens = n_tokens - 1
-        side = int(math.isqrt(patch_tokens))
-        if side * side == patch_tokens:
-            return (side, side), 1
+    for prefix in (1, 2):
+        if n_tokens > prefix:
+            patch_tokens = n_tokens - prefix
+            side = int(math.isqrt(patch_tokens))
+            if side * side == patch_tokens:
+                return (side, side), prefix
     raise ValueError(
         "Cannot infer a square patch grid from token count "
         f"{n_tokens}. Pass grid_size=(height, width) explicitly."
@@ -248,6 +249,9 @@ class TaskResponseSpatialAdapter(nn.Module):
 
         self.is_trso_adapter = True
         self.set_enabled(enabled)
+        self.register_load_state_dict_post_hook(
+            lambda module, incompatible_keys: module.sync_trainability_from_state()
+        )
 
     @property
     def enabled(self) -> bool:
@@ -319,6 +323,22 @@ class TaskResponseSpatialAdapter(nn.Module):
             self.gate.requires_grad_(False)
             self.active_rank_buffer.fill_(saved_rank)
 
+    def sync_trainability_from_state(self) -> None:
+        """Restore ``requires_grad`` from persistent rank/enabled buffers.
+
+        PyTorch state dictionaries do not serialize ``requires_grad``. This
+        method is therefore called automatically after state loading and may
+        also be called explicitly before optimizer construction.
+        """
+        rank = self.active_rank
+        enabled = self.enabled and rank > 0
+        for index, parameter in enumerate(self.coefficient_vectors):
+            parameter.requires_grad_(enabled and index < rank)
+        for index, parameter in enumerate(self.basis_atom_parameters):
+            parameter.requires_grad_(enabled and index < rank)
+        self.gate.requires_grad_(enabled)
+        self.probe_kernel.requires_grad_(self.calibrating)
+
     def start_calibration(self, reset: bool = True) -> None:
         if reset:
             self.gradient_sum.zero_()
@@ -345,50 +365,107 @@ class TaskResponseSpatialAdapter(nn.Module):
         self.probe_kernel.grad = None
 
     @torch.no_grad()
-    def finalize_calibration(self, init_scale: float = 5e-2) -> float:
+    def finalize_calibration(
+        self,
+        init_scale: float = 5e-2,
+        basis_source: str = "response",
+        random_seed: int = 0,
+    ) -> float:
+        """Finalize response statistics and initialize the requested basis.
+
+        ``response`` uses truncated SVD. ``random`` and ``dct`` project the same
+        measured response onto controlled orthonormal bases, enabling a clean
+        basis ablation without changing the operator or parameter count.
+        """
         samples = int(self.gradient_samples.item())
         if samples <= 0:
             raise RuntimeError("No probe gradients were accumulated for this TRSO adapter.")
+        basis_source = str(basis_source).lower()
+        if basis_source not in {"response", "random", "dct"}:
+            raise ValueError("basis_source must be response, random, or dct")
 
         response = self.gradient_sum / float(samples)
         descending = -response.reshape(self.channels, self.kernel_size * self.kernel_size)
-        u, s, vh = torch.linalg.svd(descending, full_matrices=False)
-        available = min(self.spatial_rank, int(s.numel()))
+        max_available = min(self.spatial_rank, self.channels, self.kernel_size * self.kernel_size)
+
+        if basis_source == "response":
+            u, s, vh = torch.linalg.svd(descending, full_matrices=False)
+            atoms_flat = vh[:max_available]
+            coefficients_raw = u[:, :max_available] * s[:max_available]
+            component_strength = s[:max_available]
+        elif basis_source == "dct":
+            atoms_flat = _dct_fallback_basis(
+                self.kernel_size, self.spatial_rank
+            ).to(response).flatten(1)[:max_available]
+            coefficients_raw = descending @ atoms_flat.transpose(0, 1)
+            component_strength = coefficients_raw.square().sum(dim=0).sqrt()
+        else:
+            generator = torch.Generator(device="cpu").manual_seed(
+                int(random_seed) + 104729 * self.channels + 1009 * self.kernel_size
+            )
+            random_matrix = torch.randn(
+                self.kernel_size * self.kernel_size, max_available, generator=generator
+            ).to(device=response.device, dtype=response.dtype)
+            atoms_flat = torch.linalg.qr(random_matrix, mode="reduced").Q.transpose(0, 1)
+            coefficients_raw = descending @ atoms_flat.transpose(0, 1)
+            component_strength = coefficients_raw.square().sum(dim=0).sqrt()
+
+        # Order controlled bases by captured response energy so rank-r is nested.
+        order = torch.argsort(component_strength, descending=True)
+        atoms_flat = atoms_flat[order]
+        coefficients_raw = coefficients_raw[:, order]
+        component_strength = component_strength[order]
 
         atoms = _dct_fallback_basis(self.kernel_size, self.spatial_rank).to(response)
         coefficients = torch.zeros(
-            self.channels,
-            self.spatial_rank,
-            dtype=response.dtype,
-            device=response.device,
+            self.channels, self.spatial_rank, dtype=response.dtype, device=response.device
         )
+        available = min(max_available, atoms_flat.shape[0])
         if available > 0:
-            atoms[:available].copy_(vh[:available].reshape(available, self.kernel_size, self.kernel_size))
-            coefficients[:, :available].copy_(u[:, :available] * s[:available])
-
-            reconstructed = coefficients[:, :available] @ vh[:available]
+            atoms[:available].copy_(atoms_flat[:available].reshape(available, self.kernel_size, self.kernel_size))
+            coefficients[:, :available].copy_(coefficients_raw[:, :available])
+            reconstructed = coefficients[:, :available] @ atoms_flat[:available]
             scale = float(init_scale) / reconstructed.norm().clamp_min(self.eps)
             coefficients[:, :available].mul_(scale)
 
         self._copy_basis(atoms)
         self._copy_coefficients(coefficients)
         self.singular_values.zero_()
-        self.singular_values[:available].copy_(s[:available])
-        score = s[:available].square().sum()
+        self.singular_values[:available].copy_(component_strength[:available])
+        score = component_strength[:available].square().sum()
         self.response_score.copy_(score)
 
         mean_square = self.gradient_square_sum / float(samples)
         variance = (mean_square - response.square()).clamp_min(0.0)
         self.response_noise.copy_(variance.sum())
-
         self.calibrated_flag.fill_(True)
         self.set_active_rank(self.spatial_rank)
         self.stop_calibration()
         return float(score.item())
 
-    def rank_value(self, rank: int) -> float:
+    def rank_value(
+        self,
+        rank: int,
+        score_mode: str = "energy",
+        noise_beta: float = 0.0,
+    ) -> float:
         rank = max(0, min(int(rank), self.spatial_rank))
-        return float(self.singular_values[:rank].square().sum().item())
+        if rank == 0:
+            return 0.0
+        energy = float(self.singular_values[:rank].square().sum().item())
+        mode = str(score_mode).lower()
+        if mode == "energy":
+            return energy
+        if mode == "energy_per_param":
+            return energy / max(1, self.parameter_cost_for_rank(rank))
+        if mode == "energy_per_channel":
+            return energy / max(1, self.channels)
+        if mode == "noise_adjusted":
+            noise_share = float(self.response_noise.item()) * rank / max(1, self.spatial_rank)
+            return max(0.0, energy - float(noise_beta) * noise_share)
+        raise ValueError(
+            "score_mode must be energy, energy_per_param, energy_per_channel, or noise_adjusted"
+        )
 
     def parameter_cost_for_rank(self, rank: int) -> int:
         rank = int(rank)
@@ -555,6 +632,16 @@ def iter_trso_adapters(model: nn.Module) -> Iterable[Tuple[str, TaskResponseSpat
             yield name, module
 
 
+def sync_trso_trainability(model: nn.Module) -> List[str]:
+    """Synchronize every TRSO adapter after checkpoint/config loading."""
+    selected: List[str] = []
+    for name, adapter in iter_trso_adapters(model):
+        adapter.sync_trainability_from_state()
+        if adapter.enabled and adapter.active_rank > 0:
+            selected.append(name)
+    return selected
+
+
 def _prune_dominated_states(states):
     """Remove states that cost more without producing a larger value."""
     grouped = {}
@@ -578,71 +665,119 @@ def select_trso_layers(
     max_adapters: Optional[int] = None,
     keep_ratio: float = 1.0,
     parameter_budget: Optional[int] = None,
+    allocation: str = "exact",
+    score_mode: str = "energy",
+    noise_beta: float = 0.0,
 ) -> List[str]:
-    """Select layers and ranks by exact response-energy maximization.
+    """Allocate TRSO ranks under controlled exact/greedy/uniform rules.
 
-    For layer l and allocated rank r, the value is the captured singular energy
-    ``sum_{i<=r} sigma_{l,i}^2``.  Under a parameter budget this solves the
-    multiple-choice knapsack problem exactly with sparse dynamic programming.
-    Rank zero means that the layer is not adapted.
+    ``exact`` solves the multiple-choice knapsack for the selected score
+    surrogate. ``greedy`` selects the best incremental value/cost step.
+    ``uniform`` assigns a common rank to the highest-scoring layers.
     """
     adapters = list(iter_trso_adapters(model))
     if not adapters:
         return []
     if not (0 < keep_ratio <= 1.0):
         raise ValueError(f"keep_ratio must be in (0, 1], got {keep_ratio}")
+    allocation = str(allocation).lower()
+    if allocation not in {"exact", "greedy", "uniform"}:
+        raise ValueError("allocation must be exact, greedy, or uniform")
     by_ratio = max(1, int(math.ceil(len(adapters) * keep_ratio)))
     keep = by_ratio if max_adapters is None or max_adapters <= 0 else min(by_ratio, int(max_adapters))
 
-    if parameter_budget is None or parameter_budget <= 0:
-        ranked = sorted(
-            adapters,
-            key=lambda row: row[1].rank_value(row[1].spatial_rank),
-            reverse=True,
-        )
+    def value(adapter: TaskResponseSpatialAdapter, rank: int) -> float:
+        return adapter.rank_value(rank, score_mode=score_mode, noise_beta=noise_beta)
+
+    ranked = sorted(adapters, key=lambda row: value(row[1], row[1].spatial_rank), reverse=True)
+    budget = int(parameter_budget or 0)
+    if budget <= 0:
         chosen_names = {name for name, _ in ranked[:keep]}
         for name, adapter in adapters:
             adapter.set_active_rank(adapter.spatial_rank if name in chosen_names else 0)
         return [name for name, _ in ranked[:keep]]
 
     cheapest = min(adapter.parameter_cost_for_rank(1) for _, adapter in adapters)
-    if parameter_budget < cheapest:
+    if budget < cheapest:
         raise ValueError(
-            f"TRSO parameter budget {parameter_budget} is smaller than the cheapest "
-            f"rank-one candidate ({cheapest} parameters)."
+            f"TRSO parameter budget {budget} is smaller than the cheapest rank-one candidate ({cheapest})."
         )
 
-    # State payload: (total_value, tuple_of_allocated_ranks).
-    states = {(0, 0): (0.0, tuple())}
-    for _, adapter in adapters:
-        updated = {}
-        for (used_cost, used_count), (value, choices) in states.items():
-            for rank in range(adapter.spatial_rank + 1):
-                new_count = used_count + int(rank > 0)
-                if new_count > keep:
+    if allocation == "uniform":
+        best_ranks = [0] * len(adapters)
+        name_to_index = {name: index for index, (name, _) in enumerate(adapters)}
+        # Highest common rank that permits at least one selected layer; add
+        # layers in score order until the next one exceeds budget/keep.
+        for common_rank in range(max(a.spatial_rank for _, a in adapters), 0, -1):
+            ranks = [0] * len(adapters)
+            used = 0
+            count = 0
+            for name, adapter in ranked:
+                rank = min(common_rank, adapter.spatial_rank)
+                cost = adapter.parameter_cost_for_rank(rank)
+                if count < keep and used + cost <= budget:
+                    ranks[name_to_index[name]] = rank
+                    used += cost
+                    count += 1
+            if count > 0:
+                best_ranks = ranks
+                break
+    elif allocation == "greedy":
+        best_ranks = [0] * len(adapters)
+        used_cost = 0
+        active_count = 0
+        while True:
+            candidates = []
+            for index, (_, adapter) in enumerate(adapters):
+                current = best_ranks[index]
+                if current >= adapter.spatial_rank:
                     continue
-                new_cost = used_cost + adapter.parameter_cost_for_rank(rank)
-                if new_cost > parameter_budget:
+                if current == 0 and active_count >= keep:
                     continue
-                new_value = value + adapter.rank_value(rank)
-                key = (new_cost, new_count)
-                candidate = (new_value, choices + (rank,))
-                current = updated.get(key)
-                if current is None or candidate[0] > current[0] + 1e-12:
-                    updated[key] = candidate
-        states = _prune_dominated_states(updated)
+                next_rank = current + 1
+                incremental_cost = adapter.parameter_cost_for_rank(next_rank) - adapter.parameter_cost_for_rank(current)
+                if used_cost + incremental_cost > budget:
+                    continue
+                gain = value(adapter, next_rank) - value(adapter, current)
+                ratio = gain / max(1, incremental_cost)
+                candidates.append((ratio, gain, -incremental_cost, index, next_rank))
+            if not candidates:
+                break
+            _, _, neg_cost, index, next_rank = max(candidates)
+            old_rank = best_ranks[index]
+            incremental_cost = -neg_cost
+            best_ranks[index] = next_rank
+            used_cost += incremental_cost
+            if old_rank == 0:
+                active_count += 1
+    else:
+        # Exact sparse dynamic program. State payload: value, rank tuple.
+        states = {(0, 0): (0.0, tuple())}
+        for _, adapter in adapters:
+            updated = {}
+            for (used_cost, used_count), (total_value, choices) in states.items():
+                for rank in range(adapter.spatial_rank + 1):
+                    new_count = used_count + int(rank > 0)
+                    if new_count > keep:
+                        continue
+                    new_cost = used_cost + adapter.parameter_cost_for_rank(rank)
+                    if new_cost > budget:
+                        continue
+                    candidate = (total_value + value(adapter, rank), choices + (rank,))
+                    key = (new_cost, new_count)
+                    current = updated.get(key)
+                    if current is None or candidate[0] > current[0] + 1e-12:
+                        updated[key] = candidate
+            states = _prune_dominated_states(updated)
+        if not states:
+            raise RuntimeError("No feasible TRSO allocation was found.")
+        _, (_, best_ranks) = max(states.items(), key=lambda item: (item[1][0], -item[0][0]))
+        best_ranks = list(best_ranks)
 
-    if not states:
-        raise RuntimeError("No feasible TRSO allocation was found.")
-    (best_cost, _), (best_value, best_ranks) = max(
-        states.items(), key=lambda item: (item[1][0], -item[0][0])
-    )
-    del best_cost, best_value
     for (_, adapter), rank in zip(adapters, best_ranks):
         adapter.set_active_rank(rank)
-
     selected_rows = [
-        (name, adapter.rank_value(rank))
+        (name, value(adapter, rank))
         for (name, adapter), rank in zip(adapters, best_ranks)
         if rank > 0
     ]

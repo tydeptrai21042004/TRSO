@@ -108,6 +108,19 @@ python -m tools.run_fair_suite \
 
 For `csv`, `--task` must be explicit.
 
+## Universal TRSO-v3 defaults
+
+V3 uses automatic calibration size, automatic model-relative budget, response-derived grouping, loss-scale-normalized calibration, residual RMS control, stable-energy-per-parameter scoring, and multi-prefix coupling. Zero values request automatic resolution:
+
+```text
+--trso_variant v3
+--trso_parameter_budget 0
+--trso_calibration_batches 0
+--trso_channel_groups 0
+```
+
+The resolved values and insertion points are stored in each run artifact. Named backbone contracts take precedence; conservative generic Conv2d/pre-norm token-block fallbacks are recorded explicitly.
+
 ## Fair TRSO ablation
 
 The ablation runner is also dataset/task/backbone agnostic. It first trains a
@@ -127,9 +140,7 @@ python -m tools.run_ablation_suite \
   --execute
 ```
 
-The suite covers response/random/DCT bases, exact/greedy/uniform allocation,
-noise-aware and normalized scores, rank, kernel support, calibration size, and
-parameter budget.
+The suite covers V1/V2/V3, response/random/DCT bases, exact/greedy/uniform allocation, calibration-gradient normalization, residual normalization, response versus contiguous grouping, prefix coupling, stability/cost-aware scores, rank, kernel support, calibration size, and parameter budget.
 
 ## Metrics
 

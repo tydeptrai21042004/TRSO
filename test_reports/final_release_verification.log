@@ -1,3 +1,115 @@
+........................................................................ [ 65%]
+......................................                                   [100%]
+110 passed in 12.37s
+{
+  "baselines": {
+    "visual_prompt": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "conv_adapter": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "bam": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "residual_adapter": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "ssf": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "lora": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "bitfit": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "adaptformer": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "piggyback": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    },
+    "side_tuning": {
+      "output_shape": [
+        2,
+        5
+      ],
+      "gradient_ok": true
+    }
+  },
+  "all_ok": true,
+  "failures": []
+}
+{
+  "cnn_shape_ok": true,
+  "vit_shape_ok": true,
+  "cls_token_preserved": true,
+  "bhwc_shape_ok": true,
+  "disabled_returns_same_tensor": true,
+  "fused_max_error": 1.1175870895385742e-08,
+  "maximum_channel_kernel_l1": 0.07112492620944977,
+  "coefficient_gradient_l1": 0.0035318545267273294,
+  "calibration_tangent_cosine": 1.0,
+  "recovered_kernel_cosine": 1.0,
+  "recovered_channel_spatial_rank": 2,
+  "configured_rank": 2
+}
+[ALL OK] Scientific TRSO preflight passed
+{
+  "synthetic": {
+    "baseline_mse": 0.01498323306441307,
+    "v1_mse": 0.010148775763809681,
+    "v2_mse": 0.008960988372564316,
+    "v1_adapter_parameters": 129,
+    "v2_adapter_parameters": 25,
+    "v2_parameter_fraction_of_v1": 0.1937984496124031,
+    "v2_improves_over_v1": true
+  },
+  "transformer_prefix": {
+    "class_token_changed": true,
+    "prefix_gate_parameters": 1,
+    "prefix_gate_gradient": 0.0064224544912576675
+  },
+  "all_ok": true,
+  "scope": "Controlled structural/numerical diagnostic; not a real-dataset accuracy result."
+}
 {
   "canonical_datasets": [
     "caltech101",
@@ -165,32 +277,6 @@
     "recovered_kernel_cosine": 1.0,
     "recovered_channel_spatial_rank": 2,
     "configured_rank": 2
-  },
-  "trso_v3_preflight": {
-    "parameter_scaling": {
-      "v2_parameters": 25,
-      "v3_parameters": 25,
-      "v3_auto_groups": 8
-    },
-    "task_loss_scale_invariance": {
-      "basis_max_error": 7.748603820800781e-07,
-      "coefficient_max_error": 7.450580596923828e-09
-    },
-    "feature_scale_invariance": {
-      "update_to_feature_rms_ratios": [
-        0.049996282905340195,
-        0.04999905824661255,
-        0.05000000819563866
-      ],
-      "max_ratio_spread": 3.725290298461914e-06
-    },
-    "token_generality": {
-      "rectangular_grid_shape_ok": true,
-      "both_prefix_tokens_changed": true,
-      "prefix_updates_equal": true
-    },
-    "all_ok": true,
-    "scope": "Universal structural/numerical diagnostics; no real-dataset accuracy is claimed."
   },
   "task_plans": {
     "single_label": {

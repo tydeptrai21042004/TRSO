@@ -18,6 +18,7 @@ from datasets.build import available_datasets
 from models.model_support import METHOD_SUPPORT
 from tools.preflight_paper_baselines import run as baseline_preflight
 from tools.preflight_trso import run as trso_preflight
+from tools.preflight_trso_v3 import run_preflight as trso_v3_preflight
 from tools.run_fair_suite import SINGLE_LABEL_DATASETS, build_suite
 from tools.verify_fairness import verify_manifest
 from tools.experiment_grid import write_manifest
@@ -52,6 +53,7 @@ def run_audit() -> dict:
         "tasks": ["single_label", "multilabel", "regression"],
         "baseline_preflight": baseline_preflight(),
         "trso_preflight": asdict(trso_preflight(torch.device("cpu"))),
+        "trso_v3_preflight": trso_v3_preflight(),
         "task_plans": {},
     }
     with TemporaryDirectory() as temporary:
@@ -85,6 +87,7 @@ def run_audit() -> dict:
         and report["trso_preflight"]["fused_max_error"] < 2e-5
         and report["trso_preflight"]["calibration_tangent_cosine"] > 0.999999
         and report["trso_preflight"]["recovered_kernel_cosine"] > 0.9999
+        and report["trso_v3_preflight"]["all_ok"]
         and all(item["fairness_verified"] for item in report["task_plans"].values())
     )
     return report

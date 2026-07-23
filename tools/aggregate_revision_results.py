@@ -38,6 +38,47 @@ def infer_metadata(run_dir: str, root: str) -> Dict[str, Any]:
     return meta
 
 
+def summarize_trso_calibration(payload: Dict[str, Any]) -> Dict[str, Any]:
+    adapters = payload.get("adapters", {}) if isinstance(payload, dict) else {}
+    if not isinstance(adapters, dict) or not adapters:
+        return {}
+    states = [state for state in adapters.values() if isinstance(state, dict)]
+    selected = [state for state in states if bool(state.get("enabled", False)) and int(state.get("active_rank", 0)) > 0]
+
+    def mean_of(key: str, rows=selected):
+        values = [float(row[key]) for row in rows if key in row]
+        return sum(values) / len(values) if values else None
+
+    adapter_parameters = 0
+    for state in selected:
+        rank = int(state.get("active_rank", 0))
+        groups = int(state.get("channel_groups", 0))
+        coefficient_mode = str(state.get("coefficient_mode", "grouped"))
+        channels = int(state.get("channels", 0))
+        if coefficient_mode == "full":
+            coefficients = channels * rank
+        elif coefficient_mode == "locked":
+            coefficients = rank
+        else:
+            coefficients = groups * rank
+        adapter_parameters += coefficients
+        adapter_parameters += groups if bool(state.get("channel_response", False)) else 0
+        adapter_parameters += 1  # residual gate
+        adapter_parameters += 1 if bool(state.get("prefix_coupling", False)) else 0
+    return {
+        "selected_layers": len(selected),
+        "candidate_layers": len(states),
+        "adapter_parameters_from_config": adapter_parameters,
+        "mean_active_rank": mean_of("active_rank"),
+        "mean_response_stability": mean_of("response_stability"),
+        "mean_channel_response_stability": mean_of("channel_response_stability"),
+        "mean_response_score": mean_of("response_score"),
+        "mean_response_noise": mean_of("response_noise"),
+        "mean_raw_gradient_norm": mean_of("mean_raw_gradient_norm"),
+        "mean_channel_groups": mean_of("channel_groups"),
+    }
+
+
 def _numeric_columns(df: pd.DataFrame, excluded: set[str]) -> list[str]:
     columns: list[str] = []
     for column in df.columns:
@@ -73,6 +114,7 @@ def main() -> None:
         efficiency = read_json(os.path.join(run_dir, "efficiency_profile.json"))
         convergence = read_json(os.path.join(run_dir, "convergence_summary.json"))
         parameters = read_json(os.path.join(run_dir, "parameter_summary.json"))
+        trso_calibration = read_json(os.path.join(run_dir, "trso_calibration.json"))
 
         for key in (
             "experiment_suite",
@@ -84,6 +126,9 @@ def main() -> None:
             "backbone",
             "tuning_method",
             "seed",
+            "trso_variant",
+            "trso_coefficient_mode",
+            "trso_channel_groups",
             "trso_basis_source",
             "trso_allocation",
             "trso_score_mode",
@@ -96,6 +141,7 @@ def main() -> None:
         row.update(flatten_dict("eff", efficiency))
         row.update(flatten_dict("conv", convergence))
         row.update(flatten_dict("param", parameters))
+        row.update(flatten_dict("trso", summarize_trso_calibration(trso_calibration)))
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -153,6 +199,11 @@ def main() -> None:
         "test_r2", "test_pearson", "test_spearman",
         "param_trainable_params", "param_total_params", "param_trainable_ratio",
         "param_piggyback_deployed_mask_megabytes",
+        "trso_selected_layers", "trso_candidate_layers",
+        "trso_adapter_parameters_from_config", "trso_mean_active_rank",
+        "trso_mean_response_stability", "trso_mean_channel_response_stability",
+        "trso_mean_response_score", "trso_mean_response_noise",
+        "trso_mean_raw_gradient_norm", "trso_mean_channel_groups",
         "eff_flops_g", "eff_latency_ms_per_image", "eff_fps",
         "eff_peak_inference_memory_mb", "conv_best_val_acc1",
         "conv_best_val_map", "conv_best_val_mae", "conv_best_val_rmse",

@@ -1,0 +1,18 @@
+{
+  "synthetic": {
+    "baseline_mse": 0.01498323306441307,
+    "v1_mse": 0.010148775763809681,
+    "v2_mse": 0.008960988372564316,
+    "v1_adapter_parameters": 129,
+    "v2_adapter_parameters": 25,
+    "v2_parameter_fraction_of_v1": 0.1937984496124031,
+    "v2_improves_over_v1": true
+  },
+  "transformer_prefix": {
+    "class_token_changed": true,
+    "prefix_gate_parameters": 1,
+    "prefix_gate_gradient": 0.0064224544912576675
+  },
+  "all_ok": true,
+  "scope": "Controlled structural/numerical diagnostic; not a real-dataset accuracy result."
+}

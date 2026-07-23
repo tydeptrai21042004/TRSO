@@ -3,13 +3,13 @@
 ## Automated tests
 
 ```text
-106 passed
+110 passed
 ```
 
 The suite covers baseline modules, paper-oriented architecture fidelity,
 checkpoint resume, partial gradient accumulation, experiment grids, task-aware
 metrics, fair-manifest generation, compatibility skips, input/task routing,
-AdaptFormer, Piggyback, and TRSO calibration/allocation controls.
+AdaptFormer, Piggyback, universal task routing, and TRSO-v1/v2 calibration/allocation controls.
 
 ## Structural baseline preflight
 
@@ -27,12 +27,18 @@ trainable-gradient checks for:
 - Piggyback;
 - Side-Tuning.
 
+## TRSO-v2 checks
+
+The V2-specific suite verifies grouped task-locked coefficients, low parameter
+cost, synthetic response approximation, bounded stronger gating, direct class-token
+coupling, and SNR-per-parameter allocation. See `TEST_REPORT_TRSO_V2.md`.
+
 ## TRSO preflight
 
 `test_reports/trso_preflight_universal.json` verifies:
 
 - BCHW, BNC and BHWC layouts;
-- class-token preservation;
+- V1 class-token preservation and V2 direct class-token coupling;
 - fused and explicit operator equivalence;
 - coefficient gradients;
 - exact calibration/training tangent alignment;

@@ -1,0 +1,32 @@
+{
+  "single": {
+    "task_type": "single_label",
+    "primary_metrics": {
+      "acc1": 50.0,
+      "macro_f1": 39.16666805744171
+    },
+    "selected_layers": 4,
+    "completed_final_test": true
+  },
+  "multi": {
+    "task_type": "multilabel",
+    "primary_metrics": {
+      "map": 66.66666699780357,
+      "micro_f1": 46.15384638309479,
+      "macro_f1": 22.22222238779068
+    },
+    "selected_layers": 4,
+    "completed_final_test": true
+  },
+  "reg": {
+    "task_type": "regression",
+    "primary_metrics": {
+      "mae": 1.1593033075332642,
+      "rmse": 1.4218041896820068,
+      "r2": -65.89743041992188
+    },
+    "selected_layers": 4,
+    "completed_final_test": true
+  },
+  "scope": "Tiny synthetic/CSV end-to-end execution used only to verify all task paths, checkpoint selection, and metrics."
+}

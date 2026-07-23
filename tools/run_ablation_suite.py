@@ -45,7 +45,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seeds", default="0,1,2")
     parser.add_argument("--split_seed", type=int, default=2026)
-    parser.add_argument("--parameter_budget", type=int, default=12000)
+    parser.add_argument("--parameter_budget", type=int, default=0, help="0 uses the automatic V3 backbone-scaled budget.")
     parser.add_argument("--peft_lr", type=float, default=5e-3)
     parser.add_argument("--linear_lr", type=float, default=1e-1)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -63,23 +63,61 @@ def get_parser() -> argparse.ArgumentParser:
 def ablation_variants(budget: int):
     proposed = {
         "tuning_method": "trso",
+        "trso_variant": "v3",
         "trso_basis_source": "response",
         "trso_allocation": "exact",
-        "trso_score_mode": "noise_adjusted",
-        "trso_noise_beta": 0.25,
+        "trso_score_mode": "stable_energy_per_param",
+        "trso_noise_beta": 0.0,
+        "trso_coefficient_mode": "grouped",
+        "trso_channel_groups": 0,
+        "trso_grouping_mode": "response",
+        "trso_input_norm": "rms",
+        "trso_calibration_grad_norm": "rms",
+        "trso_residual_norm": "rms",
+        "trso_residual_target": 0.05,
+        "trso_channel_response": True,
+        "trso_prefix_coupling": True,
+        "trso_prefix_coupling_mode": "all",
+        "trso_v2_gate_init": 1.0,
         "trso_parameter_budget": budget,
-        "trso_calibration_batches": 16,
+        "trso_calibration_batches": 0,
         "trso_kernel_size": 5,
         "trso_spatial_rank": 2,
         "trso_head_warmup_steps": 0,
     }
     rows = [("proposed", proposed)]
     controlled = {
+        "v1_original": {
+            "trso_variant": "v1", "trso_coefficient_mode": "full",
+            "trso_input_norm": "none", "trso_channel_response": False,
+            "trso_prefix_coupling": False, "trso_gate_init": 1e-2,
+            "trso_calibration_grad_norm": "none", "trso_residual_norm": "none",
+            "trso_grouping_mode": "contiguous", "trso_score_mode": "energy",
+            "trso_parameter_budget": 12000,
+        },
+        "v2_previous": {
+            "trso_variant": "v2", "trso_channel_groups": 8,
+            "trso_grouping_mode": "contiguous", "trso_calibration_grad_norm": "none",
+            "trso_residual_norm": "none", "trso_score_mode": "snr_per_param",
+        },
+        "v3_no_channel_response": {"trso_channel_response": False},
+        "v3_no_input_norm": {"trso_input_norm": "none"},
+        "v3_no_gradient_norm": {"trso_calibration_grad_norm": "none"},
+        "v3_no_residual_norm": {"trso_residual_norm": "none"},
+        "v3_contiguous_groups": {"trso_grouping_mode": "contiguous"},
+        "v3_full_coefficients": {"trso_coefficient_mode": "full", "trso_parameter_budget": 12000},
+        "v3_locked_coefficients": {"trso_coefficient_mode": "locked"},
+        "v3_groups_1": {"trso_channel_groups": 1},
+        "v3_groups_4": {"trso_channel_groups": 4},
+        "v3_groups_16": {"trso_channel_groups": 16},
+        "v3_no_prefix_coupling": {"trso_prefix_coupling": False},
+        "v3_prefix_first": {"trso_prefix_coupling_mode": "first"},
         "basis_random": {"trso_basis_source": "random"},
         "basis_dct": {"trso_basis_source": "dct"},
         "allocation_greedy": {"trso_allocation": "greedy"},
         "allocation_uniform": {"trso_allocation": "uniform"},
         "score_energy": {"trso_score_mode": "energy", "trso_noise_beta": 0.0},
+        "score_stability": {"trso_score_mode": "stability_per_param", "trso_noise_beta": 0.0},
         "score_noise_adjusted": {"trso_score_mode": "noise_adjusted", "trso_noise_beta": 0.1},
         "score_per_param": {"trso_score_mode": "energy_per_param", "trso_noise_beta": 0.0},
         "score_per_channel": {"trso_score_mode": "energy_per_channel", "trso_noise_beta": 0.0},
@@ -128,6 +166,7 @@ def common_args(args):
         "save_ckpt": True,
         "save_ckpt_freq": 1,
         "save_history": True,
+        "evaluate_before_training": True,
         "final_test": True,
         "auto_resume": False,
         "fair_protocol": True,
@@ -149,6 +188,7 @@ def common_args(args):
         "smoothing": 0.0,
         "reprob": 0.0,
         "keep_pretrained_head": False,
+        "peft_freeze_head": True,
     }
     common.update(extra)
     return common

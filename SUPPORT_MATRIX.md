@@ -18,7 +18,7 @@ baseline.
 | AdaptFormer | Recognized ViT blocks | Single-label, multi-label, regression task-head extension | Parallel FFN bottleneck + task head |
 | Piggyback | CNN/ResNet convolutional weights | Single-label, multi-label, regression task-head extension | Real mask scores + task head |
 | Side-Tuning | ResNet | Single-label, multi-label, regression task-head extension | Lightweight side path, alpha and task head |
-| TRSO | Recognized CNN, ViT and Swin feature layouts | Single-label, multi-label, regression | Selected TRSO ranks/gates + task head |
+| TRSO-v3 | Named CNN/ViT/Swin contracts plus conservative generic Conv2d and pre-norm token-block fallbacks; BCHW/BHWC/BNC, rectangular grids and multiple prefixes | Single-label, multi-label, regression | Response-group amplitudes, bounded gates, optional prefix couplings and task head |
 
 “Task-head extension” means the paper’s adaptation operator is preserved while
 the downstream task head/loss is changed. These rows must not be described as
@@ -43,8 +43,7 @@ the paper evaluated only classification.
 - `piggyback`: paper defaults are mask score `1e-2`, threshold `5e-3`, frozen
   biases/BN and Adam-family optimization.
 - `sidetune`: use `--sidetune_arch lightweight` for the primary baseline.
-- `trso`: use native resolution (`--input_size 0`), a task-aware shared head,
-  and pre-block Transformer insertion.
+- `trso`: V3 defaults to native resolution (`--input_size 0`), a task-aware shared head, scale-normalized calibration, model-relative automatic budget/calibration sizing, named insertion contracts with recorded generic fallbacks, and pre-block token insertion.
 
 `adapter` is a legacy alias of `conv` and is not a separate baseline row.
 `lora_conv` is deliberately rejected by the strict factory.

@@ -1,0 +1,48 @@
+Not using distributed mode
+Namespace(backbone='resnet18', model_source='torchvision', weights='none', list_backbones=False, list_compatibility=False, experiment_suite='', experiment_name='', experiment_run_id='', legacy_auto_hparams=False, pretrained=False, keep_pretrained_head=True, cifar_hub='auto', clip_model=None, clip_pretrained='openai', freeze_backbone=True, tuning_method='trso', sidetune_alpha=0.5, sidetune_learn_alpha=True, sidetune_width=64, sidetune_depth=4, sidetune_arch='lightweight', sidetune_checkpoint='', prompt_size=30, prompt_type='padding', prompt_output_indices='', prompt_mapping='identity', prompt_mapping_batches=0, kernel_size=3, adapt_size=8, adapt_scale=1.0, conv_adapter_mode='conv_parallel', trso_kernel_size=5, trso_spatial_rank=2, trso_channel_ratio=16, trso_operator_radius=1.0, trso_gate_init=0.01, trso_basis_init_scale=0.05, trso_basis_trainable=False, trso_calibration=True, trso_calibration_batches=2, trso_calibration_scale=1.0, trso_head_warmup_steps=-1, trso_keep_ratio=1.0, trso_max_adapters=0, trso_parameter_budget=128, trso_auto_budget_ratio=5e-05, trso_auto_budget_min=128, trso_auto_budget_max=1024, trso_config='', trso_save_config='', trso_basis_source='response', trso_allocation='exact', trso_score_mode='stable_energy_per_param', trso_noise_beta=0.0, trso_variant='v3', trso_coefficient_mode='auto', trso_channel_groups=0, trso_grouping_mode='auto', trso_input_norm='auto', trso_calibration_grad_norm='auto', trso_residual_norm='auto', trso_residual_target=0.05, trso_residual_scale_limit=1024.0, trso_channel_response=True, trso_channel_init_scale=0.01, trso_prefix_coupling=True, trso_prefix_coupling_mode='auto', trso_prefix_gate_init=1.0, trso_v2_gate_init=1.0, trso_gate_limit=2.0, trso_gate_search=False, trso_gate_search_values='0.25,0.5,1.0,1.5', trso_gate_search_batches=4, trso_generic_fallback=True, trso_generic_max_candidates=32, bam_reduction=16, bam_dilation=4, bam_gate_init=0.0, bam_use_bn=True, bam_insert='stage', bam_stages='1,2,3,4', ra_mode='parallel', ra_reduction=1, ra_norm='bn', ra_act='none', ra_gate_init=0.0, ra_stages='1,2,3,4', ra_pretrained_checkpoint='', ssf_init_scale=1.0, ssf_init_shift=0.0, ssf_init_std=0.02, lora_r=8, lora_alpha=16.0, lora_dropout=0.0, lora_merge_weights=True, lora_target='all', bitfit_train_head=True, bitfit_bias_scope='all', adaptformer_dim=16, adaptformer_scale=0.1, adaptformer_dropout=0.0, adaptformer_layernorm='none', piggyback_threshold=0.005, piggyback_mask_init='ones', piggyback_mask_scale=0.01, piggyback_mask_linear=False, piggyback_train_head=True, batch_size=4, epochs=1, update_freq=1, fs_shot=16, model='resnet50_clip', drop_path=0, input_size=32, crop_ratio=0.875, model_ema=False, model_ema_decay=0.9999, model_ema_force_cpu=False, model_ema_eval=False, optimizer='adamw', momentum=0.9, paper_hparams=False, opt_eps=1e-08, clip_grad=None, weight_decay=0.0001, weight_decay_adapter=0.0, lr=0.001, min_lr=1e-06, warmup_epochs=0, warmup_steps=-1, weight_decay_end=None, fair_protocol=False, fair_optimizer='adamw', fair_peft_lr=0.005, fair_full_lr=0.0001, fair_linear_lr=0.1, fair_weight_decay=0.0001, fair_warmup_epochs=5, fair_min_lr=1e-06, color_jitter=0.0, aa='none', smoothing=0.0, regression_loss='mse', train_interpolation='bicubic', crop_pct=None, reprob=0.0, remode='pixel', recount=1, resplit=False, imagenet_norm=True, train_aug='resize', mixup=0.0, cutmix=0.0, cutmix_minmax=None, mixup_prob=1.0, mixup_switch_prob=0.5, mixup_mode='batch', finetune='', head_from='', head_init_scale=1.0, peft_freeze_head=False, model_key='model|module', model_prefix='', is_tuning=False, dataset='csv', task='regression', download=False, allow_val_as_test=False, val_ratio=0.1, dtd_partition=1, places_small=True, inat_target_type='full', coco_task='multilabel', celeba_task='attributes', train_csv='/tmp/trso_v3_tasks/regression_train.csv', val_csv='/tmp/trso_v3_tasks/regression_val.csv', test_csv='/tmp/trso_v3_tasks/regression_test.csv', image_column='image', label_column='label', label_separator=';', data_path='/tmp/trso_v3_tasks', eval_data_path=None, nb_classes=1000, fake_train_size=32, fake_val_size=16, fake_test_size=16, imagenet_default_mean_and_std=True, output_dir='/tmp/trso_v3_tasks/out_reg', log_dir=None, device='cpu', seed=0, split_seed=42, deterministic=False, resume='', auto_resume=False, save_ckpt=True, save_ckpt_freq=1, save_ckpt_num=1, start_epoch=0, eval=False, dist_eval=True, disable_eval=False, final_test=True, num_workers=0, pin_mem=False, world_size=1, local_rank=-1, dist_on_itp=False, dist_url='env://', use_amp=False, profile_efficiency=False, profile_batch_size=32, save_history=True, measure_eval_latency=False, evaluate_before_training=False, enable_wandb=False, project='parameter_efficient_tuning_cv', wandb_ckpt=False, data='trso_v3_tasks', distributed=False)
+[Info] Using device: cpu  (AMP=off)
+[Info] Loaded resnet18 from torchvision with weights=None.
+[Compatibility] method=trso | family=resnet | source=torchvision
+[TRSO] Completed 4 head warm-up steps.
+[TRSO] Calibration batches=2; candidates=8; selected=4; budget=128
+[TRSO] * layer4.1.pet_adapter: response_score=2.917213e+03; active_rank=1; variant=v3; mode=grouped; trainable_cost=34
+[TRSO] * layer4.0.pet_adapter: response_score=2.420124e+03; active_rank=1; variant=v3; mode=grouped; trainable_cost=34
+[TRSO] * layer3.1.pet_adapter: response_score=1.547452e+03; active_rank=1; variant=v3; mode=grouped; trainable_cost=34
+[TRSO]   layer3.0.pet_adapter: response_score=1.388874e+03; active_rank=0; variant=v3; mode=grouped; trainable_cost=0
+[TRSO]   layer2.0.pet_adapter: response_score=6.624434e+02; active_rank=0; variant=v3; mode=grouped; trainable_cost=0
+[TRSO]   layer2.1.pet_adapter: response_score=6.611604e+02; active_rank=0; variant=v3; mode=grouped; trainable_cost=0
+[TRSO] * layer1.0.pet_adapter: response_score=5.464177e+02; active_rank=1; variant=v3; mode=grouped; trainable_cost=18
+[TRSO]   layer1.1.pet_adapter: response_score=4.866295e+02; active_rank=0; variant=v3; mode=grouped; trainable_cost=0
+[TRSO] Saved calibration config to /tmp/trso_v3_tasks/out_reg/trso_calibration.json
+memory_cost_MB: 11.235
+param_size_MB: 11.235
+act_size_MB: 0.000
+Number of trainable params: 1,202
+Number of total params: 11,231,666
+LR = 0.00100000
+Batch size = 4
+Number of training examples = 18
+Number of training steps per epoch = 4
+[ParamGroups] adapter_like=176 others=1,026
+Optimizer = AdamW
+Set warmup steps = 0
+Set warmup steps = 0
+criterion = MSELoss() | task=regression
+Start training for 1 epochs
+Epoch: [0]  [0/4]  eta: 0:00:00  lr: 0.001000  min_lr: 0.001000  loss: 0.4762 (0.4762)  batch_mae: 0.5683 (0.5683)  weight_decay: 0.0001 (0.0001)  time: 0.0190  data: 0.0011
+Epoch: [0]  [3/4]  eta: 0:00:00  lr: 0.000147  min_lr: 0.000147  loss: 0.1895 (0.2870)  batch_mae: 0.3471 (0.4204)  weight_decay: 0.0001 (0.0001)  time: 0.0240  data: 0.0013
+Epoch: [0] Total time: 0:00:00 (0.0241 s / it)
+Averaged stats: lr: 0.000147  min_lr: 0.000147  loss: 0.1895 (0.2870)  batch_mae: 0.3471 (0.4204)  weight_decay: 0.0001 (0.0001)  epoch_time: 0.0965 (0.0965)
+Test:  [0/2]  eta: 0:00:00  loss: 1.0775 (1.0775)  time: 0.0097  data: 0.0016
+Test:  [1/2]  eta: 0:00:00  loss: 1.0775 (1.1591)  time: 0.0098  data: 0.0012
+Test: Total time: 0:00:00 (0.0100 s / it)
+* MAE 0.90412 RMSE 1.07660 R2 -37.01198 Pearson 0.12308 loss 1.15906
+Validation on 6 samples: MAE=0.90412
+Best validation MAE=0.90412 at epoch 0
+Training time 0:00:00
+[Info] Strictly loaded best checkpoint for final test: /tmp/trso_v3_tasks/out_reg/checkpoint-best.pth
+Test:  [0/2]  eta: 0:00:00  loss: 1.8603 (1.8603)  time: 0.0113  data: 0.0019
+Test:  [1/2]  eta: 0:00:00  loss: 1.8603 (2.0215)  time: 0.0093  data: 0.0013
+Test: Total time: 0:00:00 (0.0094 s / it)
+* MAE 1.15930 RMSE 1.42180 R2 -65.89743 Pearson 0.41439 loss 2.02153
+Final test on 6 samples: MAE=1.15930

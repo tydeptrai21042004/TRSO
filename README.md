@@ -1,84 +1,79 @@
 # TRSO: universal fair baseline framework
 
-> **Current release:** dataset/task/backbone-aware controlled comparisons, 13 unique method entries (including AdaptFormer and Piggyback), shared-head TRSO calibration, comprehensive metrics, explicit compatibility skips, and automatic fairness verification. See [UNIVERSAL_FAIR_FRAMEWORK.md](UNIVERSAL_FAIR_FRAMEWORK.md).
+> **Current release:** TRSO-v3 Universal Adaptive. The proposal now uses task-loss-scale-invariant calibration, response-derived grouping, feature-scale-controlled residuals, automatic model-relative budgets/calibration sizes, rectangular token grids, multiple prefix tokens, and conservative generic CNN/Transformer insertion fallbacks. V1 and V2 remain available as ablations. See [TRSO_V3_METHOD.md](TRSO_V3_METHOD.md), [TEST_REPORT_TRSO_V3.md](TEST_REPORT_TRSO_V3.md), and [GENERALIZATION_SCOPE.md](GENERALIZATION_SCOPE.md).
 
 # Scientific TRSO
 
-> **Strict baseline fidelity:** paper-named baselines now use only their
-> published architecture domain and active computational graph. Unsupported
-> pairings fail before training. See `BASELINE_FIDELITY.md`,
-> `SUPPORT_MATRIX.md`, and `PAPER_REPRODUCTION.md`.
-
-
 **Task-Response Spatial Operator Adaptation for parameter-efficient visual fine-tuning**
 
-Scientific TRSO is intentionally based on three components only:
+TRSO-v3 preserves the original scientific core—aligned task-response measurement, exact rank-constrained SVD projection, and exact global rank allocation—while removing assumptions tied to one dataset, loss scale, feature scale, channel order, image shape, or single-prefix Transformer.
 
-1. **aligned task-response measurement** using the same depthwise operator in calibration and training;
-2. **exact rank-constrained local projection** by truncated SVD;
-3. **exact layer-and-rank allocation** under a global trainable-parameter budget.
+The default V3 path provides:
 
-The method does not use a random channel bottleneck, GELU inside the proposal operator, a hand-designed dilation bank, a router, frequency branches, or a collection of auxiliary losses.
+- per-batch RMS-normalized calibration gradients for single-label, multi-label, and regression losses;
+- response-derived balanced channel groups with automatic width-aware group count;
+- per-sample adapter residual RMS control, defaulting to a 5% update-to-feature ratio;
+- stable response-energy-per-parameter allocation;
+- automatic calibration size and model-relative parameter budget when set to zero;
+- BCHW, BHWC, and BNC layouts, rectangular patch grids, and multiple prefix tokens;
+- preferred named architecture contracts plus conservative generic Conv2d/token-block fallbacks.
 
-It supports:
+Paper-named baselines remain strict to their supported architecture domains. Unsupported combinations are explicit compatibility skips, not silent approximations.
 
-- CNN tensors in `B x C x H x W` format;
-- Vision Transformer tokens in `B x N x C` format;
-- Swin-style tensors in `B x H x W x C` format.
-
-Spatial filtering preserves prefix tokens exactly. Automatic token-grid inference supports zero, one or two prefix tokens on square grids; rectangular grids must be supplied explicitly by backbone metadata.
-
-## Framework support extension
-
-The repository now uses one shared, task-aware training pipeline for:
-
-- single-label classification;
-- multi-label classification;
-- image regression.
-
-It exposes 37 active dataset routes, 80 filtered torchvision
-image-classification builders in the current environment, optional timm and
-Torch Hub backbones, and OpenAI CLIP/OpenCLIP visual encoders.
-
-Baseline support is intentionally **domain-safe**. CNN baselines remain CNN
-baselines, Transformer baselines remain Transformer baselines, and unsupported
-method/backbone pairs stop before training rather than being silently adapted.
-
-```bash
-python main.py --list_compatibility
-python main.py --list_backbones
-```
-
-See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the method contract,
-[BASELINE_FIDELITY.md](BASELINE_FIDELITY.md) for paper-versus-implementation
-labels, and [DATASETS.md](DATASETS.md) for dataset layouts and split protocols.
-
-## Universal fair all-baseline suite
-
-The recommended runner is dataset/task/backbone aware. It schedules every
-scientifically compatible baseline, records every incompatible pairing as an
-explicit skip, and applies one shared PEFT optimizer, learning rate, cosine
-scheduler, warm-up, augmentation and checkpoint rule. Only full fine-tuning
-and linear probing may use separate learning rates.
+## TRSO-v3 quick start
 
 ```bash
 python -m tools.run_fair_suite \
   --dataset dtd --task auto --data_path ./data --download True \
   --backbones resnet50@torchvision,vit_tiny_patch16_224@timm \
-  --methods auto --seeds 0,1,2 --execute
+  --methods auto --seeds 0,1,2 --epochs 30 --input_size 0 \
+  --peft_lr 5e-3 --full_lr 1e-4 --linear_lr 1e-1 \
+  --warmup_epochs 5 --trso_budget 0 --execute
+```
 
+For direct proposal runs, use:
+
+```text
+--tuning_method trso
+--trso_variant v3
+--trso_parameter_budget 0
+--trso_calibration_batches 0
+--trso_channel_groups 0
+--trso_grouping_mode auto
+--trso_calibration_grad_norm auto
+--trso_residual_norm auto
+--trso_score_mode stable_energy_per_param
+--trso_prefix_coupling_mode auto
+```
+
+Run the focused general V3 search with:
+
+```bash
+python -m tools.run_trso_v3_search --help
+```
+
+## Framework scope
+
+The shared pipeline supports all registered dataset routes, single-label
+classification, multi-label classification, and image regression. Generic
+`imagefolder` and `csv` inputs allow additional datasets without source changes.
+Use `--input_size 0` to resolve native pretrained resolution before transforms.
+
+Every requested method/backbone/task pair appears in the compatibility report as
+`scheduled` or `skipped` with a reason. Verify comparable protocols using:
+
+```bash
 python -m tools.verify_fairness \
   --manifest experiments/fair_manifest.json \
   --compatibility experiments/fair_manifest_compatibility.json
 ```
 
-Change `--dataset`, `--task`, dataset-specific JSON arguments, and backbones for
-single-label, multi-label, or regression experiments. See
-[UNIVERSAL_FAIR_FRAMEWORK.md](UNIVERSAL_FAIR_FRAMEWORK.md) and
-[UNIVERSAL_RELEASE_CHECKLIST.md](UNIVERSAL_RELEASE_CHECKLIST.md). The older
-DTD-only runner remains as a regression-tested dataset-specific example.
+No honest implementation can guarantee the highest accuracy on every dataset.
+This release guarantees the generalized operator behavior, task/backbone routing,
+metric schemas, protocol checks, and explicit failure boundaries required to run
+the real comparison correctly.
 
-## 1. Scientific formulation
+## 1. Original V1 scientific formulation (retained for ablation)
 
 At candidate layer `l`, let
 
@@ -131,7 +126,7 @@ W_l^flat proportional to U_r Sigma_r V_r^T.
 
 This follows directly from completing the square and the Eckart--Young--Mirsky theorem.
 
-## 2. Trainable operator
+## 2. Original V1 trainable operator
 
 TRSO parameterizes the depthwise kernel bank as
 
@@ -162,7 +157,7 @@ Each channel kernel is projected independently to satisfy
 ||W_l,c||_1 <= rho.
 ```
 
-## 3. Exact layer-and-rank allocation
+## 3. Exact layer-and-rank allocation (V1 and V2)
 
 For layer `l`, the predicted value of rank `r` is
 

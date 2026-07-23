@@ -1,3 +1,5 @@
+> **Legacy dataset-specific example.** The active release is dataset/task/backbone generic; use `tools.run_fair_suite` and `TRSO_V3_METHOD.md` for new experiments.
+
 # Fair all-baseline DTD experiment
 
 This suite replaces the earlier six-epoch smoke test. It is designed to compare

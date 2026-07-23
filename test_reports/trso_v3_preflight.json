@@ -1,0 +1,26 @@
+{
+  "parameter_scaling": {
+    "v2_parameters": 25,
+    "v3_parameters": 25,
+    "v3_auto_groups": 8
+  },
+  "task_loss_scale_invariance": {
+    "basis_max_error": 7.748603820800781e-07,
+    "coefficient_max_error": 7.450580596923828e-09
+  },
+  "feature_scale_invariance": {
+    "update_to_feature_rms_ratios": [
+      0.049996282905340195,
+      0.04999905824661255,
+      0.05000000819563866
+    ],
+    "max_ratio_spread": 3.725290298461914e-06
+  },
+  "token_generality": {
+    "rectangular_grid_shape_ok": true,
+    "both_prefix_tokens_changed": true,
+    "prefix_updates_equal": true
+  },
+  "all_ok": true,
+  "scope": "Universal structural/numerical diagnostics; no real-dataset accuracy is claimed."
+}

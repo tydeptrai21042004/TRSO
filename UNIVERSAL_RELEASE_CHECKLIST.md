@@ -31,14 +31,21 @@ silently rewritten to run on an incompatible backbone.
   methods, seeds, and one or multiple GPUs.
 - Automatic fairness verification detects protocol mismatches before results are
   interpreted.
+- TRSO-v3 removes task-loss-unit dependence through per-batch response normalization.
+- Response-derived channel grouping replaces fixed channel-index assumptions.
+- Residual RMS control makes initial adapter strength comparable across feature scales.
+- Automatic calibration and model-relative budget resolution replace DTD/backbone-specific defaults.
+- Rectangular token grids and multiple prefix tokens are supported.
+- Conservative generic CNN and Transformer insertion fallbacks are tested and recorded.
 
 ## Verified scope
 
 - 37 canonical dataset routes have an automatic or explicit task-resolution path.
 - Tasks: single-label classification, multi-label classification, image regression.
-- Representative CNN and Transformer families pass structural baseline and TRSO
-  preflights.
-- The complete automated test suite passes.
+- Representative named and generic CNN/Transformer layouts pass structural TRSO preflights.
+- Rectangular grids, multiple prefix tokens, task-loss scaling and feature scaling pass numerical invariance tests.
+- Complete single-label, multi-label and regression smoke runs pass checkpoint restoration and final metrics.
+- The complete 118-test automated suite passes.
 - Dry-run manifests and fairness checks pass for all three task types.
 
 ## Scientific boundary

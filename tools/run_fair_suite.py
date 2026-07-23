@@ -106,8 +106,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--warmup_epochs", type=int, default=5)
     p.add_argument("--min_lr", type=float, default=1e-6)
     p.add_argument("--optimizer", default="adamw", choices=["adamw", "sgd"])
-    p.add_argument("--trso_budget", type=int, default=12000)
-    p.add_argument("--trso_calibration_batches", type=int, default=16)
+    p.add_argument("--trso_budget", type=int, default=0, help="0 uses TRSO-v3's backbone-scaled automatic budget.")
+    p.add_argument("--trso_calibration_batches", type=int, default=0, help="0 uses task/data-size-aware calibration.")
     p.add_argument("--ra_pretrained_checkpoint", default="")
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu_ids", default="0")
@@ -116,6 +116,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--max_runs", type=int, default=0)
     p.add_argument("--profile_efficiency", type=str2bool, default=True)
     p.add_argument("--measure_eval_latency", type=str2bool, default=True)
+    p.add_argument("--peft_freeze_head", type=str2bool, default=True, help="Use the same frozen best linear head for every compatible PEFT method.")
     p.add_argument("--allow_val_as_test", type=str2bool, default=False)
     return p
 
@@ -189,6 +190,7 @@ def base_common(args: argparse.Namespace, task: str, dataset_args: dict[str, Any
         "save_ckpt": True,
         "save_ckpt_freq": 1,
         "save_history": True,
+        "evaluate_before_training": True,
         "final_test": True,
         "auto_resume": False,
         "fair_protocol": True,
@@ -209,6 +211,7 @@ def base_common(args: argparse.Namespace, task: str, dataset_args: dict[str, Any
         "smoothing": 0.0,
         "reprob": 0.0,
         "keep_pretrained_head": False,
+        "peft_freeze_head": getattr(args, "peft_freeze_head", True),
         "split_seed": args.split_seed,
         "allow_val_as_test": args.allow_val_as_test,
     }
@@ -235,14 +238,29 @@ def method_variant(
 
     if method == "trso":
         row.update({
+            "trso_variant": "v3",
             "trso_basis_source": "response",
             "trso_allocation": "exact",
-            "trso_score_mode": "noise_adjusted",
-            "trso_noise_beta": 0.25,
+            "trso_score_mode": "stable_energy_per_param",
+            "trso_noise_beta": 0.0,
             "trso_parameter_budget": args.trso_budget,
             "trso_calibration_batches": args.trso_calibration_batches,
             "trso_kernel_size": 5,
             "trso_spatial_rank": 2,
+            "trso_coefficient_mode": "grouped",
+            "trso_channel_groups": 0,
+            "trso_grouping_mode": "response",
+            "trso_input_norm": "rms",
+            "trso_calibration_grad_norm": "rms",
+            "trso_residual_norm": "rms",
+            "trso_residual_target": 0.05,
+            "trso_channel_response": True,
+            "trso_prefix_coupling": True,
+            "trso_prefix_coupling_mode": "all",
+            "trso_v2_gate_init": 1.0,
+            "trso_gate_search": True,
+            "trso_gate_search_values": "0.25,0.5,1.0,1.5",
+            "trso_gate_search_batches": 8,
             "trso_head_warmup_steps": 0,
         })
     elif method == "conv":
@@ -385,7 +403,7 @@ def main() -> None:
         "input_size_note": "0 means native pretrained size resolved before dataset transforms.",
         "scheduled_method_backbone_pairs": scheduled,
         "skipped_method_backbone_pairs": skipped,
-        "shared_head_policy": "Best linear-probe head per backbone and seed is loaded before PEFT construction/TRSO calibration; Visual Prompting retains the source head by definition.",
+        "shared_head_policy": "Best linear-probe head per backbone and seed is loaded before PEFT construction/TRSO calibration; it is frozen for all compatible PEFT methods when --peft_freeze_head=True. Visual Prompting retains the source head by definition.",
         "unsupported_policy": "Explicit skip report; no silent architectural approximation.",
     }
     protocol_path = Path(args.manifest).with_name(Path(args.manifest).stem + "_protocol.json")

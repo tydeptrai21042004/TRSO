@@ -49,9 +49,9 @@ METHOD_SUPPORT: Dict[str, MethodSupport] = {
         "ResNet-50 only; do not report conv and adapter as separate rows."
     ),
     "trso": MethodSupport(
-        frozenset({"resnet", "cnn", "vit", "swin", "transformer"}),
-        "The proposal defines explicit BCHW, BNC, and BHWC layouts.",
-        "Recognized torchvision/timm CNN, ViT, and Swin blocks."
+        ALL_FAMILIES,
+        "The proposal defines explicit BCHW, BNC, and BHWC layouts and is task-head agnostic.",
+        "Named CNN/ViT/Swin blocks plus conservative generic Conv2d and pre-norm token-block fallbacks."
     ),
     "bam": MethodSupport(
         frozenset({"resnet"}),

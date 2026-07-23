@@ -27,7 +27,7 @@ DATASET_ARGS = {"dtd_partition": 1}
 BACKBONES = "resnet50@torchvision,vit_tiny_patch16_224@timm"
 METHODS = "auto"  # all unique registered baselines; incompatible rows are explicit skips
 SEEDS = "0,1,2"
-EPOCHS = 20
+EPOCHS = 30
 BATCH_SIZE = 64
 INPUT_SIZE = 0  # native pretrained resolution, resolved before transforms
 PEFT_LR = 5e-3
@@ -35,10 +35,11 @@ FULL_LR = 1e-4
 LINEAR_LR = 1e-1
 WEIGHT_DECAY = 1e-4
 WARMUP_EPOCHS = 5
-TRSO_BUDGET = 12000
-RUN_ABLATION = True
+TRSO_BUDGET = 0  # automatic model-relative V3 budget
+RUN_ABLATION = False
 ABLATION_BACKBONE = "resnet50"
 ABLATION_SOURCE = "torchvision"
+RUN_TRSO_V3_SEARCH = True
 RUN_TESTS = True
 KEEP_CHECKPOINTS = False
 # ----------------------------------------------------------------------------------
@@ -72,7 +73,10 @@ run([
 ])
 
 required = [
+    REPO / "tests" / "test_trso_v3_universal.py",
     REPO / "tools" / "run_fair_suite.py",
+    REPO / "tools" / "run_trso_v3_search.py",
+    REPO / "tools" / "preflight_trso_v3.py",
     REPO / "tools" / "verify_fairness.py",
     REPO / "tests" / "test_universal_fair_framework.py",
     REPO / "models" / "tuning_modules" / "adaptformer.py",
@@ -136,6 +140,31 @@ run([
     "--compatibility", compatibility,
     "--output", OUTPUT_ROOT / "fairness_verification.json",
 ], cwd=REPO)
+
+if RUN_TRSO_V3_SEARCH:
+    run([
+        sys.executable, "-m", "tools.run_trso_v3_search",
+        "--dataset", DATASET,
+        "--task", TASK,
+        "--data_path", DATA_PATH,
+        "--download", str(DOWNLOAD),
+        "--backbone", ABLATION_BACKBONE,
+        "--model_source", ABLATION_SOURCE,
+        "--seeds", SEEDS,
+        "--epochs", EPOCHS,
+        "--batch_size", BATCH_SIZE,
+        "--peft_lr", PEFT_LR,
+        "--linear_lr", LINEAR_LR,
+        "--weight_decay", WEIGHT_DECAY,
+        "--warmup_epochs", WARMUP_EPOCHS,
+        "--input_size", INPUT_SIZE,
+        "--dataset_args_json", json.dumps(DATASET_ARGS),
+        "--output_root", OUTPUT_ROOT / "trso_v3_search",
+        "--manifest", OUTPUT_ROOT / "trso_v3_search_manifest.json",
+        "--gpu_ids", gpu_ids,
+        "--parallel_runs", parallel_runs,
+        "--execute",
+    ], cwd=REPO)
 
 if RUN_ABLATION:
     ablation_manifest = OUTPUT_ROOT / "ablation_manifest.json"

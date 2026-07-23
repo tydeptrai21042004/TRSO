@@ -1,0 +1,15 @@
+{
+  "cnn_shape_ok": true,
+  "vit_shape_ok": true,
+  "cls_token_preserved": true,
+  "bhwc_shape_ok": true,
+  "disabled_returns_same_tensor": true,
+  "fused_max_error": 1.1175870895385742e-08,
+  "maximum_channel_kernel_l1": 0.07112492620944977,
+  "coefficient_gradient_l1": 0.0035318540406024113,
+  "calibration_tangent_cosine": 1.0,
+  "recovered_kernel_cosine": 1.0,
+  "recovered_channel_spatial_rank": 2,
+  "configured_rank": 2
+}
+[ALL OK] Scientific TRSO preflight passed

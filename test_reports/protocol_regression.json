@@ -1,0 +1,37 @@
+{
+  "dataset": "csv",
+  "task": "regression",
+  "dataset_args": {
+    "csv_train": "train.csv",
+    "csv_val": "val.csv",
+    "csv_test": "test.csv",
+    "csv_target_columns": "y"
+  },
+  "seeds": [
+    0
+  ],
+  "backbones": [
+    [
+      "resnet50",
+      "torchvision"
+    ],
+    [
+      "vit_tiny_patch16_224",
+      "timm"
+    ]
+  ],
+  "same_peft_optimizer": "adamw",
+  "same_peft_learning_rate": 0.005,
+  "same_scheduler": "cosine",
+  "same_warmup_epochs": 5,
+  "same_weight_decay": 0.0001,
+  "full_learning_rate": 0.0001,
+  "linear_learning_rate": 0.1,
+  "epochs": 2,
+  "input_size": 0,
+  "input_size_note": "0 means native pretrained size resolved before dataset transforms.",
+  "scheduled_method_backbone_pairs": 14,
+  "skipped_method_backbone_pairs": 12,
+  "shared_head_policy": "Best linear-probe head per backbone and seed is loaded before PEFT construction/TRSO calibration; Visual Prompting retains the source head by definition.",
+  "unsupported_policy": "Explicit skip report; no silent architectural approximation."
+}

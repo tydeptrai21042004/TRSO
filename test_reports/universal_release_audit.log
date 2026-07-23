@@ -1,0 +1,248 @@
+{
+  "canonical_datasets": [
+    "caltech101",
+    "celeba",
+    "cifar10",
+    "cifar100",
+    "coco",
+    "country211",
+    "csv",
+    "cub200",
+    "dtd",
+    "emnist",
+    "eurosat",
+    "fake",
+    "fashion_mnist",
+    "fer2013",
+    "fewshot",
+    "fgvc_aircraft",
+    "flowers102",
+    "food101",
+    "gtsrb",
+    "imagefolder",
+    "inaturalist",
+    "kmnist",
+    "mnist",
+    "nabirds",
+    "oxfordiiitpet",
+    "pcam",
+    "places365",
+    "qmnist",
+    "rendered_sst2",
+    "stanford_cars",
+    "stanford_dogs",
+    "stl10",
+    "sun397",
+    "svhn",
+    "usps",
+    "voc2007",
+    "vtab"
+  ],
+  "dataset_count": 37,
+  "datasets_missing_task_resolution": [],
+  "methods": [
+    "adapter",
+    "adaptformer",
+    "bam",
+    "bitfit",
+    "conv",
+    "full",
+    "linear",
+    "lora",
+    "piggyback",
+    "prompt",
+    "residual",
+    "sidetune",
+    "ssf",
+    "trso"
+  ],
+  "unique_reported_methods": [
+    "adaptformer",
+    "bam",
+    "bitfit",
+    "conv",
+    "full",
+    "linear",
+    "lora",
+    "piggyback",
+    "prompt",
+    "residual",
+    "sidetune",
+    "ssf",
+    "trso"
+  ],
+  "tasks": [
+    "single_label",
+    "multilabel",
+    "regression"
+  ],
+  "baseline_preflight": {
+    "baselines": {
+      "visual_prompt": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "conv_adapter": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "bam": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "residual_adapter": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "ssf": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "lora": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "bitfit": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "adaptformer": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "piggyback": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      },
+      "side_tuning": {
+        "output_shape": [
+          2,
+          5
+        ],
+        "gradient_ok": true
+      }
+    },
+    "all_ok": true,
+    "failures": []
+  },
+  "trso_preflight": {
+    "cnn_shape_ok": true,
+    "vit_shape_ok": true,
+    "cls_token_preserved": true,
+    "bhwc_shape_ok": true,
+    "disabled_returns_same_tensor": true,
+    "fused_max_error": 1.1175870895385742e-08,
+    "maximum_channel_kernel_l1": 0.07112492620944977,
+    "coefficient_gradient_l1": 0.0035318540406024113,
+    "calibration_tangent_cosine": 1.0,
+    "recovered_kernel_cosine": 1.0,
+    "recovered_channel_spatial_rank": 2,
+    "configured_rank": 2
+  },
+  "task_plans": {
+    "single_label": {
+      "resolved_task": "single_label",
+      "seeds": [
+        0
+      ],
+      "runs": 16,
+      "scheduled_pairs": 16,
+      "explicit_skips": 10,
+      "fairness_verified": true,
+      "fairness_errors": [],
+      "scheduled_methods": [
+        "adaptformer",
+        "bam",
+        "bitfit",
+        "conv",
+        "full",
+        "linear",
+        "lora",
+        "piggyback",
+        "prompt",
+        "sidetune",
+        "ssf",
+        "trso"
+      ],
+      "prompt_explicitly_skipped": false
+    },
+    "multilabel": {
+      "resolved_task": "multilabel",
+      "seeds": [
+        0
+      ],
+      "runs": 14,
+      "scheduled_pairs": 14,
+      "explicit_skips": 12,
+      "fairness_verified": true,
+      "fairness_errors": [],
+      "scheduled_methods": [
+        "adaptformer",
+        "bam",
+        "bitfit",
+        "conv",
+        "full",
+        "linear",
+        "lora",
+        "piggyback",
+        "sidetune",
+        "ssf",
+        "trso"
+      ],
+      "prompt_explicitly_skipped": true
+    },
+    "regression": {
+      "resolved_task": "regression",
+      "seeds": [
+        0
+      ],
+      "runs": 14,
+      "scheduled_pairs": 14,
+      "explicit_skips": 12,
+      "fairness_verified": true,
+      "fairness_errors": [],
+      "scheduled_methods": [
+        "adaptformer",
+        "bam",
+        "bitfit",
+        "conv",
+        "full",
+        "linear",
+        "lora",
+        "piggyback",
+        "sidetune",
+        "ssf",
+        "trso"
+      ],
+      "prompt_explicitly_skipped": true
+    }
+  },
+  "all_ok": true
+}

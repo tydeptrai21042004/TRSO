@@ -19,6 +19,11 @@ from .lora_transformer import (
 from .residual_adapter import ResidualAdapterResNet26
 from .side_tuning import ConvSideNetwork, SideTuningClassifier
 from .bitfit import set_bitfit_trainability
+from .adaptformer import AdaptFormerAdapter, apply_adaptformer, set_adaptformer_trainability
+from .piggyback import (
+    BinaryMaskSTE, PiggybackConv2d, PiggybackLinear, apply_piggyback,
+    set_piggyback_trainability, piggyback_storage, export_binary_masks,
+)
 
 
 def set_tuning_config(tuning_method, args):
@@ -31,6 +36,8 @@ def set_tuning_config(tuning_method, args):
         "bam_adapter": "bam",
         "residual_adapter": "residual",
         "side_tuning": "sidetune",
+        "adapt_former": "adaptformer",
+        "piggy_back": "piggyback",
     }
     method = aliases.get(method, method)
     if method == "prompt":
@@ -77,6 +84,20 @@ def set_tuning_config(tuning_method, args):
             "method": method,
             "bias_scope": getattr(args, "bitfit_bias_scope", "all"),
             "train_head": getattr(args, "bitfit_train_head", True),
+        }
+    if method == "adaptformer":
+        return {
+            "method": method,
+            "bottleneck": getattr(args, "adaptformer_dim", 16),
+            "scale": getattr(args, "adaptformer_scale", 0.1),
+            "dropout": getattr(args, "adaptformer_dropout", 0.0),
+        }
+    if method == "piggyback":
+        return {
+            "method": method,
+            "threshold": getattr(args, "piggyback_threshold", 5e-3),
+            "mask_init": getattr(args, "piggyback_mask_init", "ones"),
+            "mask_linear": getattr(args, "piggyback_mask_linear", False),
         }
     if method in {"full", "linear"}:
         return {"method": method}

@@ -1,0 +1,87 @@
+{
+  "manifest": "/tmp/trso_release_dry/regression_manifest.json",
+  "groups": [
+    {
+      "dataset": "csv",
+      "task": "regression",
+      "backbone": "resnet50",
+      "methods": [
+        "bam",
+        "conv",
+        "full",
+        "linear",
+        "piggyback",
+        "sidetune",
+        "trso"
+      ],
+      "peft_reference": {
+        "fair_protocol": true,
+        "fair_optimizer": "adamw",
+        "fair_peft_lr": 0.005,
+        "fair_weight_decay": 0.0001,
+        "fair_warmup_epochs": 1,
+        "fair_min_lr": 1e-06,
+        "epochs": 2,
+        "batch_size": 64,
+        "update_freq": 1,
+        "split_seed": 2026,
+        "input_size": 0,
+        "train_aug": "standard",
+        "aa": "none",
+        "color_jitter": 0.0,
+        "mixup": 0.0,
+        "cutmix": 0.0,
+        "smoothing": 0.0,
+        "reprob": 0.0,
+        "task": "regression",
+        "dataset": "csv",
+        "backbone": "resnet50"
+      },
+      "mismatches": {}
+    },
+    {
+      "dataset": "csv",
+      "task": "regression",
+      "backbone": "vit_tiny_patch16_224",
+      "methods": [
+        "adaptformer",
+        "bitfit",
+        "full",
+        "linear",
+        "lora",
+        "ssf",
+        "trso"
+      ],
+      "peft_reference": {
+        "fair_protocol": true,
+        "fair_optimizer": "adamw",
+        "fair_peft_lr": 0.005,
+        "fair_weight_decay": 0.0001,
+        "fair_warmup_epochs": 1,
+        "fair_min_lr": 1e-06,
+        "epochs": 2,
+        "batch_size": 64,
+        "update_freq": 1,
+        "split_seed": 2026,
+        "input_size": 0,
+        "train_aug": "standard",
+        "aa": "none",
+        "color_jitter": 0.0,
+        "mixup": 0.0,
+        "cutmix": 0.0,
+        "smoothing": 0.0,
+        "reprob": 0.0,
+        "task": "regression",
+        "dataset": "csv",
+        "backbone": "vit_tiny_patch16_224"
+      },
+      "mismatches": {}
+    }
+  ],
+  "errors": [],
+  "warnings": [],
+  "fair": true,
+  "compatibility_rows": 26,
+  "scheduled_pairs": 14,
+  "explicit_skips": 12
+}

@@ -13,6 +13,8 @@ import torch.nn as nn
 
 
 ALL_FAMILIES = frozenset({"resnet", "cnn", "vit", "swin", "transformer", "mlp", "clip_cnn", "clip_transformer"})
+ALL_TASKS = frozenset({"single_label", "multilabel", "regression"})
+CLASSIFICATION_TASKS = frozenset({"single_label", "multilabel"})
 CNN_FAMILIES = frozenset({"resnet", "cnn", "clip_cnn"})
 TRANSFORMER_FAMILIES = frozenset({"vit", "swin", "transformer", "clip_transformer"})
 
@@ -22,6 +24,8 @@ class MethodSupport:
     families: FrozenSet[str]
     paper_scope: str
     implementation_scope: str
+    tasks: FrozenSet[str] = ALL_TASKS
+    task_scope: str = "Task-head agnostic implementation."
 
 
 METHOD_SUPPORT: Dict[str, MethodSupport] = {
@@ -30,7 +34,9 @@ METHOD_SUPPORT: Dict[str, MethodSupport] = {
     "prompt": MethodSupport(
         frozenset({"resnet", "cnn", "vit", "swin", "transformer"}),
         "Visual prompting learns an image-space border while the pretrained classifier remains frozen.",
-        "Single-label classification with an unchanged pretrained output head and fixed label mapping."
+        "Single-label classification with an unchanged pretrained output head and fixed label mapping.",
+        tasks=frozenset({"single_label"}),
+        task_scope="The source-to-target label mapping is defined only for single-label classification."
     ),
     "conv": MethodSupport(
         frozenset({"resnet"}),
@@ -72,6 +78,16 @@ METHOD_SUPPORT: Dict[str, MethodSupport] = {
         "BitFit trains Transformer bias terms and the task classifier.",
         "Transformer biases plus task head."
     ),
+    "adaptformer": MethodSupport(
+        frozenset({"vit"}),
+        "AdaptFormer adds a parallel bottleneck branch beside each frozen ViT MLP.",
+        "Recognized timm/torchvision Vision Transformer blocks; Swin is rejected rather than approximated."
+    ),
+    "piggyback": MethodSupport(
+        frozenset({"resnet", "cnn"}),
+        "Piggyback learns binary masks over frozen pretrained CNN weights.",
+        "CNN Conv2d weights with a trainable downstream classifier; deployment storage is reported in bits."
+    ),
     "sidetune": MethodSupport(
         frozenset({"resnet"}),
         "Side-Tuning combines a frozen base with a copied trainable side network.",
@@ -99,6 +115,8 @@ def canonical_method(name: str) -> str:
         "side_tuning": "sidetune",
         "sidetuning": "sidetune",
         "side_tune": "sidetune",
+        "adapt_former": "adaptformer",
+        "piggy_back": "piggyback",
         "linear_probe": "linear",
         "finetune": "full",
     }
@@ -153,6 +171,93 @@ def validate_method_backbone(method: str, family: str) -> None:
         )
 
 
+
+def normalize_task(task: str) -> str:
+    value = str(task or "auto").strip().lower().replace("-", "_")
+    aliases = {
+        "classification": "single_label",
+        "singlelabel": "single_label",
+        "multi_label": "multilabel",
+        "multi_label_classification": "multilabel",
+    }
+    return aliases.get(value, value)
+
+
+def validate_method_task(method: str, task: str, *, allow_auto: bool = True) -> None:
+    method = canonical_method(method)
+    task = normalize_task(task)
+    if allow_auto and task == "auto":
+        return
+    if method not in METHOD_SUPPORT:
+        raise ValueError(f"Unknown tuning method '{method}'.")
+    support = METHOD_SUPPORT[method]
+    if task not in support.tasks:
+        allowed = ", ".join(sorted(support.tasks))
+        raise ValueError(
+            f"Method '{method}' is not supported for task '{task}'. "
+            f"Allowed tasks: {allowed}. Task scope: {support.task_scope}"
+        )
+
+
+def method_compatibility(method: str, family: str, task: str) -> tuple[bool, str]:
+    """Return a non-throwing capability decision for experiment planners."""
+    try:
+        validate_method_backbone(method, family)
+        validate_method_task(method, task)
+    except ValueError as exc:
+        return False, str(exc)
+    return True, "supported"
+
+
+def infer_backbone_family_name(backbone_name: str, source: str = "") -> str:
+    """Conservative family inference without constructing/downloading a model."""
+    name = str(backbone_name or "").lower()
+    text = f"{name} {str(source or '').lower()}"
+    if "clip" in text:
+        return "clip_transformer" if any(token in text for token in ("vit", "transformer")) else "clip_cnn"
+    if "swin" in text:
+        return "swin"
+    if any(token in text for token in ("vit", "deit", "beit", "eva", "cait", "vision_transformer")):
+        return "vit"
+    if any(token in text for token in ("maxvit", "transformer")):
+        return "transformer"
+    if "resnet" in text or "resnext" in text or "wide_resnet" in text:
+        return "resnet"
+    if any(token in text for token in (
+        "convnext", "efficientnet", "mobilenet", "densenet", "regnet", "vgg",
+        "alexnet", "mnasnet", "shufflenet", "squeezenet", "inception",
+        "googlenet", "nasnet", "xception", "rexnet", "coatnet",
+    )):
+        return "cnn"
+    if any(token in text for token in ("mixer", "resmlp", "gmlp")):
+        return "mlp"
+    return "unknown"
+
+
+def static_method_compatibility(
+    method: str, backbone_name: str, task: str, *, source: str = "auto",
+    residual_checkpoint: str = "",
+) -> tuple[bool, str, str]:
+    """Plan-time compatibility including paper-specific backbone contracts."""
+    method = canonical_method(method)
+    family = infer_backbone_family_name(backbone_name, source)
+    if method == "residual":
+        family = "resnet"
+    ok, reason = method_compatibility(method, family, task)
+    if not ok:
+        return False, reason, family
+    normalized = str(backbone_name or "").lower().replace("-", "_")
+    if method in {"conv", "adapter", "bam"} and "resnet50" not in normalized:
+        return False, f"{method} strict reproduction requires ResNet-50, got {backbone_name!r}.", family
+    if method == "residual":
+        if normalized not in {"resnet26_adapter", "resnet26", "residual_adapter_resnet26"}:
+            return False, "Residual Adapter uses the dedicated ResNet-26; add resnet26_adapter@auto as a separate backbone group.", family
+        if not residual_checkpoint:
+            return False, "Residual Adapter requires --ra_pretrained_checkpoint for a transfer-learning comparison.", family
+    if method == "adaptformer" and family != "vit":
+        return False, "AdaptFormer requires a recognized ViT backbone.", family
+    return True, "supported", family
+
 def compatibility_rows():
     for method, support in METHOD_SUPPORT.items():
         yield {
@@ -160,16 +265,25 @@ def compatibility_rows():
             "families": sorted(support.families),
             "paper_scope": support.paper_scope,
             "implementation_scope": support.implementation_scope,
+            "tasks": sorted(support.tasks),
+            "task_scope": support.task_scope,
         }
 
 
 __all__ = [
     "ALL_FAMILIES",
+    "ALL_TASKS",
+    "CLASSIFICATION_TASKS",
     "CNN_FAMILIES",
     "TRANSFORMER_FAMILIES",
     "METHOD_SUPPORT",
     "canonical_method",
     "detect_backbone_family",
+    "infer_backbone_family_name",
+    "static_method_compatibility",
     "validate_method_backbone",
+    "validate_method_task",
+    "method_compatibility",
+    "normalize_task",
     "compatibility_rows",
 ]

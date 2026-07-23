@@ -194,6 +194,40 @@ def _inject_vit(model: nn.Module, init_std: float) -> List[str]:
     return records
 
 
+def _inject_timm_vit(model: nn.Module, init_std: float) -> List[str]:
+    """SSF insertion for timm VisionTransformer/DeiT blocks."""
+    records: List[str] = []
+    patch_embed = getattr(model, "patch_embed", None)
+    if patch_embed is not None and hasattr(patch_embed, "proj") and isinstance(patch_embed.proj, nn.Conv2d):
+        patch_embed.proj = SSFPost(patch_embed.proj, init_std)
+        records.append("patch_embed.proj")
+    for index, block in enumerate(getattr(model, "blocks", [])):
+        prefix = f"blocks.{index}"
+        for attr in ("norm1", "norm2"):
+            child = getattr(block, attr, None)
+            if child is not None and not isinstance(child, SSFPost):
+                setattr(block, attr, SSFPost(child, init_std))
+                records.append(f"{prefix}.{attr}")
+        attn = getattr(block, "attn", None)
+        if attn is not None:
+            for attr in ("qkv", "proj"):
+                child = getattr(attn, attr, None)
+                if isinstance(child, (nn.Linear, nn.Conv2d)) and not isinstance(child, SSFPost):
+                    setattr(attn, attr, SSFPost(child, init_std))
+                    records.append(f"{prefix}.attn.{attr}")
+        mlp = getattr(block, "mlp", None)
+        if mlp is not None:
+            for attr in ("fc1", "fc2"):
+                child = getattr(mlp, attr, None)
+                if isinstance(child, nn.Linear) and not isinstance(child, SSFPost):
+                    setattr(mlp, attr, SSFPost(child, init_std))
+                    records.append(f"{prefix}.mlp.{attr}")
+    if hasattr(model, "norm") and isinstance(model.norm, nn.LayerNorm) and not isinstance(model.norm, SSFPost):
+        model.norm = SSFPost(model.norm, init_std)
+        records.append("norm")
+    return records
+
+
 def _inject_swin(model: nn.Module, init_std: float) -> List[str]:
     records: List[str] = []
     # Patch embedding Conv2d and norm.
@@ -259,7 +293,9 @@ def _inject_convnext(model: nn.Module, init_std: float) -> List[str]:
 def apply_ssf(model: nn.Module, init_std: float = 0.02) -> List[str]:
     """Insert SSF at the paper-specified operations for supported backbones."""
     text = f"{model.__class__.__module__}.{model.__class__.__name__}".lower()
-    if "vision_transformer" in text or model.__class__.__name__.lower() == "visiontransformer":
+    if hasattr(model, "blocks") and hasattr(model, "patch_embed") and hasattr(model, "norm"):
+        records = _inject_timm_vit(model, init_std)
+    elif "vision_transformer" in text or model.__class__.__name__.lower() == "visiontransformer":
         records = _inject_vit(model, init_std)
     elif "swin" in text:
         records = _inject_swin(model, init_std)
@@ -267,8 +303,8 @@ def apply_ssf(model: nn.Module, init_std: float = 0.02) -> List[str]:
         records = _inject_convnext(model, init_std)
     else:
         raise TypeError(
-            "Strict SSF reproduction supports torchvision VisionTransformer, "
-            "SwinTransformer, and ConvNeXt architectures only."
+            "Strict SSF reproduction supports torchvision/timm VisionTransformer, "
+            "torchvision SwinTransformer, and ConvNeXt architectures only."
         )
     if not records:
         raise RuntimeError("SSF insertion produced no adapted operations")

@@ -199,7 +199,7 @@ def _regression(args, dataset: Dataset, output_dim: int):
 def _build_train_test_dataset(cls, args, split: str, classes: int, **kwargs):
     if split in ("train", "val"):
         base = cls(root=args.data_path, train=True, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"), **kwargs)
-        return _single_label(args, _train_val_subset(base, split, getattr(args, "seed", 42)), classes)
+        return _single_label(args, _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42))), classes)
     base = cls(root=args.data_path, train=False, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, False), **kwargs)
     return _single_label(args, base, classes)
 
@@ -220,7 +220,7 @@ def _build_qmnist(args, split):
     transform = _img_transforms(args, split == "train")
     if split in ("train", "val"):
         base = datasets.QMNIST(root=args.data_path, what="train", download=bool(getattr(args, "download", False)), transform=transform)
-        return _single_label(args, _train_val_subset(base, split, getattr(args, "seed", 42)), 10)
+        return _single_label(args, _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42))), 10)
     return _single_label(args, datasets.QMNIST(root=args.data_path, what="test", download=bool(getattr(args, "download", False)), transform=transform), 10)
 
 
@@ -228,7 +228,7 @@ def _build_svhn(args, split):
     tv_split = "train" if split in ("train", "val") else "test"
     base = datasets.SVHN(root=args.data_path, split=tv_split, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"))
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     return _single_label(args, base, 10)
 
 
@@ -236,7 +236,7 @@ def _official_train_test(cls, args, split, classes, train_name="train", test_nam
     name = train_name if split in ("train", "val") else test_name
     base = cls(root=args.data_path, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"), **{split_kw: name}, **kwargs)
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     return _single_label(args, base, classes)
 
 
@@ -250,7 +250,7 @@ def _build_pets(args, split):
     name = "trainval" if split in ("train", "val") else "test"
     base = datasets.OxfordIIITPet(root=args.data_path, split=name, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"))
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     return _single_label(args, base, 37)
 
 
@@ -267,13 +267,13 @@ def _build_fgvc_aircraft(args, split):
     name = "trainval" if split in ("train", "val") else "test"
     base = datasets.FGVCAircraft(root=args.data_path, split=name, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"))
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     return _single_label(args, base, 100)
 
 
 def _three_way_no_official_split(cls, args, split, classes, **kwargs):
     base = cls(root=args.data_path, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"), **kwargs)
-    subset = _partition_dataset(base, split, getattr(args, "seed", 42), ratios=(0.1, 0.1, 0.8))
+    subset = _partition_dataset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)), ratios=(0.1, 0.1, 0.8))
     return _single_label(args, subset, classes)
 
 
@@ -292,7 +292,7 @@ def _build_fer2013(args, split):
             "train.csv and test.csv files in the torchvision FER2013 directory."
         ) from exc
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     return _single_label(args, base, 7)
 
 
@@ -317,7 +317,7 @@ def _build_places365(args, split):
     # and reserve the official validation images as the final test set.
     if split in ("train", "val"):
         base = datasets.Places365(root=args.data_path, split="train-standard", small=bool(getattr(args, "places_small", True)), download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"))
-        base = _train_val_subset(base, split, getattr(args, "seed", 42), val_ratio=0.05)
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)), val_ratio=0.05)
     else:
         base = datasets.Places365(root=args.data_path, split="val", small=bool(getattr(args, "places_small", True)), download=bool(getattr(args, "download", False)), transform=_img_transforms(args, False))
     return _single_label(args, base, 365)
@@ -327,7 +327,7 @@ def _build_inaturalist(args, split):
     target_type = str(getattr(args, "inat_target_type", "full"))
     if split in ("train", "val"):
         base = datasets.INaturalist(root=args.data_path, version="2021_train", target_type=target_type, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, split == "train"))
-        base = _train_val_subset(base, split, getattr(args, "seed", 42), val_ratio=0.05)
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)), val_ratio=0.05)
     else:
         base = datasets.INaturalist(root=args.data_path, version="2021_valid", target_type=target_type, download=bool(getattr(args, "download", False)), transform=_img_transforms(args, False))
     source = base.dataset if isinstance(base, Subset) else base
@@ -373,7 +373,7 @@ def _build_imagefolder(args, split):
             base = datasets.ImageFolder(test_dir, transform=_img_transforms(args, False))
         else:
             base = datasets.ImageFolder(train_dir, transform=_img_transforms(args, split == "train"))
-            base = _train_val_subset(base, split, getattr(args, "seed", 42))
+            base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
         classes = len((base.dataset if isinstance(base, Subset) else base).classes)
         return _single_label(args, base, classes)
 
@@ -383,13 +383,13 @@ def _build_imagefolder(args, split):
             base = datasets.ImageFolder(val_dir, transform=_img_transforms(args, False))
         else:
             base = datasets.ImageFolder(train_dir, transform=_img_transforms(args, split == "train"))
-            base = _train_val_subset(base, split, getattr(args, "seed", 42), val_ratio=float(getattr(args, "val_ratio", 0.1)))
+            base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)), val_ratio=float(getattr(args, "val_ratio", 0.1)))
         classes = len((base.dataset if isinstance(base, Subset) else base).classes)
         return _single_label(args, base, classes)
 
     # Root itself may be a class-folder dataset with no official splits.
     base = datasets.ImageFolder(root, transform=_img_transforms(args, split == "train"))
-    subset = _partition_dataset(base, split, getattr(args, "seed", 42), ratios=(0.1, 0.1, 0.8))
+    subset = _partition_dataset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)), ratios=(0.1, 0.1, 0.8))
     return _single_label(args, subset, len(base.classes))
 
 
@@ -429,7 +429,7 @@ class CUB200Dataset(Dataset):
 
 
 def _build_cub200(args, split):
-    return _single_label(args, CUB200Dataset(args.data_path, split, _img_transforms(args, split == "train"), getattr(args, "seed", 42), float(getattr(args, "val_ratio", 0.1))), 200)
+    return _single_label(args, CUB200Dataset(args.data_path, split, _img_transforms(args, split == "train"), getattr(args, "split_seed", getattr(args, "seed", 42)), float(getattr(args, "val_ratio", 0.1))), 200)
 
 
 class ListFileDataset(Dataset):
@@ -543,7 +543,7 @@ def _build_nabirds(args, split):
         args.data_path,
         split,
         _img_transforms(args, split == "train"),
-        int(getattr(args, "seed", 42)),
+        int(getattr(args, "split_seed", getattr(args, "seed", 42))),
         float(getattr(args, "val_ratio", 0.1)),
     )
     return _single_label(args, dataset, dataset.num_classes)
@@ -599,7 +599,7 @@ def _build_stanford_dogs(args, split):
         args.data_path,
         split,
         _img_transforms(args, split == "train"),
-        int(getattr(args, "seed", 42)),
+        int(getattr(args, "split_seed", getattr(args, "seed", 42))),
         float(getattr(args, "val_ratio", 0.1)),
     )
     return _single_label(args, dataset, 120)
@@ -741,7 +741,7 @@ def _build_coco(args, split):
     cls = CocoMajorityLabel if mode == "majority" else CocoMultiLabel
     base = cls(img_root, ann_file, _img_transforms(args, split == "train"))
     if split in ("train", "val"):
-        base = _train_val_subset(base, split, getattr(args, "seed", 42))
+        base = _train_val_subset(base, split, getattr(args, "split_seed", getattr(args, "seed", 42)))
     if mode == "majority":
         return _single_label(args, base, (base.dataset if isinstance(base, Subset) else base).num_classes)
     return _multilabel(args, base, (base.dataset if isinstance(base, Subset) else base).num_classes)

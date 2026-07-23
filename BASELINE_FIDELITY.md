@@ -22,6 +22,8 @@ requires the original assets and protocol for each paper.
 | `ssf` | Scaling and Shifting Features | SSF inside supported ViT/Swin/ConvNeXt operations; merge/export function with numerical-equivalence test |
 | `lora` | Transformer LoRA | Q/V low-rank updates, alpha/r scaling, zero-update initialization and merge/unmerge; unsupported packed-MHA dropout is rejected |
 | `bitfit` | BitFit-style bias tuning | Explicit `all`, `transformer`, or `attention` bias scope and explicit task-head policy |
+| `adaptformer` | AdaptFormer | Frozen ViT; parallel ReLU bottleneck on the FFN branch; Kaiming down projection and zero up projection |
+| `piggyback` | Piggyback | Frozen pretrained CNN weights multiplied by learned binary masks; paper threshold/init; straight-through mask gradients |
 | `sidetune` | Side-Tuning | Frozen ResNet base plus a lightweight trainable side network and learned mixture; full-copy side is retained only as a labeled high-capacity ablation |
 | `trso` | Proposed method | Task-response, random or DCT basis controls; exact, greedy or uniform allocation controls |
 
@@ -45,6 +47,22 @@ accepted only for architecture tests and synthetic smoke runs.
 
 `merge_ssf_` folds trained SSF affine parameters into supported base operations.
 The test suite requires merged and unmerged logits to agree numerically.
+
+### AdaptFormer
+
+The implementation patches only recognized ViT blocks. The original attention
+and FFN parameters remain frozen, and the adapter up-projection is initialized
+to zero so insertion initially preserves the pretrained function. Swin/window
+blocks are rejected because silently reusing the ViT forward equation would not
+be a faithful reproduction.
+
+### Piggyback
+
+Convolution weights and biases remain frozen. Real mask scores initialize to
+`1e-2` and are thresholded at `5e-3`, so all masks initially equal one. The
+backward pass uses the released straight-through rule. Batch-normalization
+statistics remain frozen. Reports distinguish full-precision mask scores during
+training from one-bit masks at deployment.
 
 ### Side-Tuning
 

@@ -1,30 +1,62 @@
-"""Generate or execute the paper-oriented TRSO ablation suite."""
+"""Generate or execute a fair, task-aware TRSO ablation suite.
+
+Every ablation starts from the same best linear-probe head for a given
+backbone/seed, preventing random-head calibration from dominating the result.
+The runner supports every dataset/task accepted by the main dataset router.
+"""
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from tools.experiment_grid import build_specs, execute_specs, parse_csv_values, write_manifest
+from tools.experiment_grid import (
+    build_specs,
+    execute_specs,
+    execute_specs_parallel,
+    parse_csv_values,
+    write_manifest,
+)
+
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}: return True
+    if text in {"0", "false", "no", "n", "off"}: return False
+    raise argparse.ArgumentTypeError(f"Expected boolean, got {value!r}")
 
 
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="fake")
+    parser.add_argument("--task", default="auto", choices=["auto", "single_label", "multilabel", "regression"])
+    parser.add_argument("--dataset_args_json", default="{}")
     parser.add_argument("--data_path", default="./data")
+    parser.add_argument("--download", type=str2bool, default=False)
     parser.add_argument("--weights", default="DEFAULT", help="Use none for offline architecture smoke tests.")
     parser.add_argument("--backbone", default="resnet18")
-    parser.add_argument("--input_size", type=int, default=64)
+    parser.add_argument("--model_source", default="auto", choices=["auto", "torchvision", "timm", "hub"])
+    parser.add_argument("--input_size", type=int, default=0, help="0 resolves native pretrained size.")
     parser.add_argument("--nb_classes", type=int, default=10)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seeds", default="0,1,2")
-    parser.add_argument("--parameter_budget", type=int, default=50000)
+    parser.add_argument("--split_seed", type=int, default=2026)
+    parser.add_argument("--parameter_budget", type=int, default=12000)
+    parser.add_argument("--peft_lr", type=float, default=5e-3)
+    parser.add_argument("--linear_lr", type=float, default=1e-1)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--output_root", default="outputs_ablation")
     parser.add_argument("--manifest", default="experiments/generated_ablation_manifest.json")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--max_runs", type=int, default=0)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--gpu_ids", default="0")
+    parser.add_argument("--parallel_runs", type=int, default=1)
     return parser
 
 
@@ -33,9 +65,10 @@ def ablation_variants(budget: int):
         "tuning_method": "trso",
         "trso_basis_source": "response",
         "trso_allocation": "exact",
-        "trso_score_mode": "energy",
+        "trso_score_mode": "noise_adjusted",
+        "trso_noise_beta": 0.25,
         "trso_parameter_budget": budget,
-        "trso_calibration_batches": 8,
+        "trso_calibration_batches": 16,
         "trso_kernel_size": 5,
         "trso_spatial_rank": 2,
         "trso_head_warmup_steps": 0,
@@ -46,17 +79,20 @@ def ablation_variants(budget: int):
         "basis_dct": {"trso_basis_source": "dct"},
         "allocation_greedy": {"trso_allocation": "greedy"},
         "allocation_uniform": {"trso_allocation": "uniform"},
-        "score_per_param": {"trso_score_mode": "energy_per_param"},
-        "score_per_channel": {"trso_score_mode": "energy_per_channel"},
+        "score_energy": {"trso_score_mode": "energy", "trso_noise_beta": 0.0},
         "score_noise_adjusted": {"trso_score_mode": "noise_adjusted", "trso_noise_beta": 0.1},
+        "score_per_param": {"trso_score_mode": "energy_per_param", "trso_noise_beta": 0.0},
+        "score_per_channel": {"trso_score_mode": "energy_per_channel", "trso_noise_beta": 0.0},
+        "noise_beta_0": {"trso_noise_beta": 0.0},
+        "noise_beta_05": {"trso_noise_beta": 0.5},
         "rank_1": {"trso_spatial_rank": 1},
         "rank_4": {"trso_spatial_rank": 4},
         "kernel_3": {"trso_kernel_size": 3},
         "kernel_7": {"trso_kernel_size": 7},
         "calibration_1": {"trso_calibration_batches": 1},
         "calibration_4": {"trso_calibration_batches": 4},
-        "calibration_16": {"trso_calibration_batches": 16},
-        "head_warmup_25": {"trso_head_warmup_steps": 25},
+        "calibration_32": {"trso_calibration_batches": 32},
+        "budget_quarter": {"trso_parameter_budget": max(1, budget // 4)},
         "budget_half": {"trso_parameter_budget": max(1, budget // 2)},
         "budget_double": {"trso_parameter_budget": 2 * budget},
         "all_candidates": {"trso_parameter_budget": 0},
@@ -68,13 +104,18 @@ def ablation_variants(budget: int):
     return rows
 
 
-def main() -> None:
-    args = get_parser().parse_args()
+def common_args(args):
+    extra = json.loads(args.dataset_args_json)
+    if not isinstance(extra, dict):
+        raise ValueError("--dataset_args_json must decode to an object")
     common = {
         "dataset": args.dataset,
+        "task": args.task,
         "data_path": args.data_path,
+        "download": args.download,
         "weights": args.weights,
         "backbone": args.backbone,
+        "model_source": args.model_source,
         "input_size": args.input_size,
         "nb_classes": args.nb_classes,
         "epochs": args.epochs,
@@ -83,22 +124,92 @@ def main() -> None:
         "device": args.device,
         "use_amp": True,
         "profile_efficiency": True,
+        "measure_eval_latency": True,
         "save_ckpt": True,
+        "save_ckpt_freq": 1,
+        "save_history": True,
         "final_test": True,
+        "auto_resume": False,
+        "fair_protocol": True,
+        "fair_optimizer": "adamw",
+        "fair_peft_lr": args.peft_lr,
+        "fair_full_lr": args.peft_lr,
+        "fair_linear_lr": args.linear_lr,
+        "fair_weight_decay": args.weight_decay,
+        "fair_warmup_epochs": min(int(args.warmup_epochs), max(0, int(args.epochs) - 1)),
+        "fair_min_lr": 1e-6,
+        "paper_hparams": False,
+        "legacy_auto_hparams": False,
+        "split_seed": args.split_seed,
+        "train_aug": "standard",
+        "aa": "none",
+        "color_jitter": 0.0,
+        "mixup": 0.0,
+        "cutmix": 0.0,
+        "smoothing": 0.0,
+        "reprob": 0.0,
+        "keep_pretrained_head": False,
     }
+    common.update(extra)
+    return common
+
+
+def main() -> None:
+    args = get_parser().parse_args()
+    seeds = parse_csv_values(args.seeds, int)
+    common = common_args(args)
+
+    head_specs = build_specs(
+        suite="trso_ablation_head_preparation",
+        variants=[("linear", {"tuning_method": "linear", "seed": seed}) for seed in seeds],
+        common=common,
+        output_root=args.output_root,
+    )
+    head_paths = {
+        int(spec.parameters["seed"]): str(Path(spec.output_dir) / "checkpoint-best.pth")
+        for spec in head_specs
+    }
+
     variants = []
-    for seed in parse_csv_values(args.seeds, int):
+    for seed in seeds:
         for name, values in ablation_variants(args.parameter_budget):
-            variants.append((name, {**values, "seed": seed}))
-    specs = build_specs(
+            variants.append((name, {**values, "seed": seed, "head_from": head_paths[seed]}))
+    ablation_specs = build_specs(
         suite="trso_ablation",
         variants=variants,
         common=common,
         output_root=args.output_root,
     )
+    specs = [*head_specs, *ablation_specs]
     manifest, csv_manifest = write_manifest(specs, args.manifest)
+    protocol = {
+        "dataset": args.dataset,
+        "task": args.task,
+        "backbone": args.backbone,
+        "model_source": args.model_source,
+        "seeds": seeds,
+        "shared_head": "best linear-probe checkpoint per seed",
+        "shared_optimizer": "AdamW",
+        "shared_lr": args.peft_lr,
+        "shared_scheduler": "cosine",
+        "shared_weight_decay": args.weight_decay,
+        "shared_warmup_epochs": args.warmup_epochs,
+        "variants": [name for name, _ in ablation_variants(args.parameter_budget)],
+    }
+    protocol_path = Path(args.manifest).with_name(Path(args.manifest).stem + "_protocol.json")
+    protocol_path.write_text(json.dumps(protocol, indent=2), encoding="utf-8")
     print(f"Wrote {len(specs)} runs to {manifest} and {csv_manifest}")
-    execute_specs(specs, execute=args.execute, max_runs=args.max_runs)
+
+    if args.execute:
+        gpu_ids = parse_csv_values(args.gpu_ids, int)[: max(1, int(args.parallel_runs))]
+        if len(gpu_ids) > 1:
+            execute_specs_parallel(head_specs, execute=True, gpu_ids=gpu_ids)
+            execute_specs_parallel(ablation_specs, execute=True, gpu_ids=gpu_ids, max_runs=args.max_runs)
+        else:
+            execute_specs(head_specs, execute=True)
+            execute_specs(ablation_specs, execute=True, max_runs=args.max_runs)
+    else:
+        execute_specs(specs, execute=False, max_runs=args.max_runs)
 
 
 if __name__ == "__main__":

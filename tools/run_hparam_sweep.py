@@ -8,6 +8,7 @@ only when the resulting run count is computationally affordable.
 from __future__ import annotations
 
 import argparse
+import json
 
 from tools.experiment_grid import (
     build_specs,
@@ -78,6 +79,19 @@ METHOD_SPACES = {
          "bitfit_bias_scope": ["all", "transformer", "attention"],
          "bitfit_train_head": [True, False]},
     ),
+    "adaptformer": (
+        {"lr": 1e-3, "weight_decay": 0.0, "adaptformer_dim": 16,
+         "adaptformer_scale": 0.1, "adaptformer_dropout": 0.0},
+        {"lr": [3e-4, 1e-3, 3e-3, 5e-3], "adaptformer_dim": [4, 8, 16, 32],
+         "adaptformer_scale": [0.05, 0.1, 0.5, 1.0]},
+    ),
+    "piggyback": (
+        {"lr": 1e-3, "weight_decay": 1e-4, "piggyback_threshold": 5e-3,
+         "piggyback_mask_init": "ones", "piggyback_mask_linear": False},
+        {"lr": [3e-4, 1e-3, 3e-3, 5e-3],
+         "piggyback_threshold": [0.0, 5e-3, 1e-2],
+         "piggyback_mask_init": ["ones", "near_threshold"]},
+    ),
     "sidetune": (
         {"optimizer": "sgd", "lr": 1e-3, "weight_decay": 1e-4,
          "sidetune_width": 64, "sidetune_depth": 4,
@@ -99,6 +113,8 @@ DEFAULT_BACKBONES = {
     "bam": "resnet50",
     "residual": "resnet26_adapter",
     "bitfit": "vit_b_16",
+    "adaptformer": "vit_tiny_patch16_224",
+    "piggyback": "resnet18",
     "sidetune": "resnet18",
 }
 
@@ -121,19 +137,24 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", required=True, choices=sorted(METHOD_SPACES))
     parser.add_argument("--strategy", default="one_factor", choices=["one_factor", "grid"])
     parser.add_argument("--dataset", default="fake")
+    parser.add_argument("--task", default="auto", choices=["auto", "single_label", "multilabel", "regression"])
+    parser.add_argument("--dataset_args_json", default="{}")
     parser.add_argument("--data_path", default="./data")
+    parser.add_argument("--download", action="store_true")
     parser.add_argument("--weights", default="DEFAULT", help="Use none for offline architecture smoke tests.")
     parser.add_argument(
         "--backbone",
         default="",
         help="Empty selects the method-compatible default; override explicitly for real experiments.",
     )
-    parser.add_argument("--input_size", type=int, default=64)
+    parser.add_argument("--model_source", default="auto", choices=["auto", "torchvision", "timm", "hub"])
+    parser.add_argument("--input_size", type=int, default=0, help="0 resolves native pretrained size.")
     parser.add_argument("--nb_classes", type=int, default=10)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seeds", default="0,1,2")
+    parser.add_argument("--split_seed", type=int, default=2026)
     parser.add_argument("--output_root", default="outputs_hparams")
     parser.add_argument("--manifest", default="experiments/generated_hparam_manifest.json")
     parser.add_argument("--execute", action="store_true")
@@ -150,11 +171,17 @@ def main() -> None:
     for seed in parse_csv_values(args.seeds, int):
         for index, row in enumerate(rows):
             variants.append((f"{args.method}_{index:04d}", {"tuning_method": args.method, "seed": seed, **row}))
+    dataset_args = json.loads(args.dataset_args_json)
+    if not isinstance(dataset_args, dict):
+        raise ValueError("--dataset_args_json must decode to an object")
     common = {
         "dataset": args.dataset,
+        "task": args.task,
         "data_path": args.data_path,
+        "download": args.download,
         "weights": args.weights,
         "backbone": args.backbone or DEFAULT_BACKBONES[args.method],
+        "model_source": args.model_source,
         "input_size": args.input_size,
         "nb_classes": args.nb_classes,
         "epochs": args.epochs,
@@ -165,6 +192,8 @@ def main() -> None:
         "profile_efficiency": True,
         "save_ckpt": True,
         "final_test": True,
+        "split_seed": args.split_seed,
+        **dataset_args,
     }
     if args.method == "residual":
         common["ra_pretrained_checkpoint"] = args.ra_pretrained_checkpoint

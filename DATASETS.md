@@ -1,5 +1,13 @@
 # Dataset and protocol support
 
+
+## Universal controlled runner
+
+All entries below can be used with `python -m tools.run_fair_suite`. The runner
+resolves the dataset task, records split sizes in `dataset_protocol.json`, and
+creates an explicit method/backbone/task compatibility report. For `csv`, pass
+`--task` explicitly. See `UNIVERSAL_FAIR_FRAMEWORK.md`.
+
 The active router exposes **37 canonical dataset entries** and three task
 types. Run:
 

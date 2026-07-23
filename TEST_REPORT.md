@@ -1,51 +1,74 @@
-# Verification report
+# Verification report — universal fair release
 
-## Automated result
+## Automated tests
 
 ```text
-85 passed
+106 passed
 ```
 
-Run with:
+The suite covers baseline modules, paper-oriented architecture fidelity,
+checkpoint resume, partial gradient accumulation, experiment grids, task-aware
+metrics, fair-manifest generation, compatibility skips, input/task routing,
+AdaptFormer, Piggyback, and TRSO calibration/allocation controls.
 
-```bash
-./scripts/test_all.sh
-```
+## Structural baseline preflight
 
-## New regression coverage
+`test_reports/paper_baselines_preflight.json` reports successful output and
+trainable-gradient checks for:
 
-### Training and resumption
+- Visual Prompting;
+- Conv-Adapter;
+- BAM;
+- Residual Adapter;
+- SSF;
+- LoRA;
+- BitFit;
+- AdaptFormer;
+- Piggyback;
+- Side-Tuning.
 
-- incomplete gradient-accumulation windows still perform an optimizer step;
-- exact accumulation windows preserve the expected step count;
-- frozen BatchNorm running statistics remain unchanged during PEFT/linear-probe training;
-- TRSO active rank is restored before optimizer construction;
-- the post-load hook restores rank-specific `requires_grad` state;
-- strict resume rejects architecture-mismatched checkpoints;
-- optimizer state, epoch, best metric, best epoch and history are restored.
+## TRSO preflight
 
-### Baseline fidelity
+`test_reports/trso_preflight_universal.json` verifies:
 
-- Conv-Adapter released equation and ResNet bottleneck insertion location;
-- padding, fixed-patch and random-patch visual prompts;
-- Residual Adapter option-A shortcut, series order and shared-filter coverage;
-- SSF merged/unmerged numerical equivalence;
-- LoRA nonzero merge/unmerge equivalence and unsupported MHA dropout guard;
-- BitFit bias-scope and task-head policy;
-- lightweight Side-Tuning default and frozen base model.
+- BCHW, BNC and BHWC layouts;
+- class-token preservation;
+- fused and explicit operator equivalence;
+- coefficient gradients;
+- exact calibration/training tangent alignment;
+- known low-rank kernel recovery;
+- rank bound and operator-radius projection.
 
-### TRSO scientific controls
+## Universal release audit
 
-- response, random and DCT basis construction;
-- exact, greedy and uniform allocation under a common budget;
-- energy, energy-per-parameter, energy-per-channel and noise-adjusted scores;
-- deterministic experiment-grid and manifest generation.
+`test_reports/universal_release_audit.json` verifies offline that:
 
-## Baseline-only release test
+- all 37 canonical dataset entries have a task-resolution path;
+- single-label, multi-label and regression manifests are generated;
+- all scheduled PEFT rows share the controlled recipe;
+- unsupported method/backbone/task pairs are explicit skips;
+- Visual Prompting is explicitly excluded from multi-label/regression rather
+  than silently producing an invalid result;
+- the structural baseline and TRSO preflights pass.
 
-```bash
-./scripts/test_all_baselines.sh
-```
+## Executed task smoke tests
 
-This script now uses pytest consistently and no longer reports zero integration
-tests through an incompatible unittest invocation.
+The development audit executed one-epoch synthetic train/validation/test runs
+for single-label, multi-label and regression paths using frozen-head and TRSO
+configurations. Each path produced a strict best checkpoint and task-specific
+final-test JSON. These runs validate plumbing only; they are not benchmark
+accuracy claims.
+
+## Executable manifest and fairness dry runs
+
+The release entry points were executed in planning mode for all three tasks:
+
+| Task | Executable runs | Scheduled method/backbone pairs | Explicit skips | Fairness errors |
+|---|---:|---:|---:|---:|
+| Single-label, 3 seeds | 48 | 16 | 10 | 0 |
+| Multi-label, 1 seed | 14 | 14 | 12 | 0 |
+| Regression, 1 seed | 14 | 14 | 12 | 0 |
+
+The universal TRSO ablation planner generated 69 runs for three seeds, and the
+AdaptFormer hyperparameter planner generated 10 valid configurations in its
+smoke manifest. These were planner/CLI checks, not accuracy claims.

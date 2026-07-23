@@ -52,7 +52,7 @@ from memory_utils import profile_memory_cost
 from models import build_model
 from models.model_support import (
     canonical_method, compatibility_rows, detect_backbone_family,
-    validate_method_backbone,
+    validate_method_backbone, validate_method_task, normalize_task,
 )
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
@@ -99,7 +99,7 @@ def get_args_parser():
         default="trso",
         help=(
             "full | linear | prompt | conv | adapter | trso | bam | residual | "
-            "ssf | lora | bitfit | sidetune"
+            "ssf | lora | bitfit | adaptformer | piggyback | sidetune"
         ),
     )
 
@@ -114,7 +114,9 @@ def get_args_parser():
     # Prompt / Conv-Adapter
     parser.add_argument("--prompt_size", default=30, type=int)
     parser.add_argument("--prompt_type", default="padding", choices=["padding", "fixed_patch", "random_patch"])
-    parser.add_argument("--prompt_output_indices", default="", type=str, help="Comma-separated fixed pretrained output indices; empty uses 0..C-1.")
+    parser.add_argument("--prompt_output_indices", default="", type=str, help="Comma-separated fixed pretrained output indices. Explicit indices override --prompt_mapping.")
+    parser.add_argument("--prompt_mapping", default="identity", choices=["identity", "frequency"], help="Training-derived frequency mapping avoids the weak identity-map fallback.")
+    parser.add_argument("--prompt_mapping_batches", default=0, type=int, help="Number of train batches for frequency mapping; 0 uses the full train loader.")
     parser.add_argument("--kernel_size", default=3, type=int)
     parser.add_argument("--adapt_size", default=8, type=float)
     parser.add_argument("--adapt_scale", default=1.0, type=float)
@@ -171,6 +173,19 @@ def get_args_parser():
     parser.add_argument("--bitfit_train_head", type=str2bool, default=True)
     parser.add_argument("--bitfit_bias_scope", type=str, default="all", choices=["all", "transformer", "attention"])
 
+    # AdaptFormer (NeurIPS 2022)
+    parser.add_argument("--adaptformer_dim", type=int, default=16)
+    parser.add_argument("--adaptformer_scale", type=float, default=0.1)
+    parser.add_argument("--adaptformer_dropout", type=float, default=0.0)
+    parser.add_argument("--adaptformer_layernorm", type=str, default="none", choices=["none", "in", "out"])
+
+    # Piggyback (ECCV 2018)
+    parser.add_argument("--piggyback_threshold", type=float, default=5e-3)
+    parser.add_argument("--piggyback_mask_init", type=str, default="ones", choices=["ones", "near_threshold"])
+    parser.add_argument("--piggyback_mask_scale", type=float, default=1e-2)
+    parser.add_argument("--piggyback_mask_linear", type=str2bool, default=False)
+    parser.add_argument("--piggyback_train_head", type=str2bool, default=True)
+
     # Batch / epochs
     parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--epochs", default=100, type=int)
@@ -202,6 +217,18 @@ def get_args_parser():
     parser.add_argument("--warmup_epochs", type=int, default=0)
     parser.add_argument("--warmup_steps", type=int, default=-1)
     parser.add_argument("--weight_decay_end", type=float, default=None)
+
+    # Controlled fairness protocol. All PEFT methods share one optimizer, LR,
+    # scheduler, warm-up and decay; full tuning and linear probing may use
+    # separate learning rates as explicitly allowed by the experiment design.
+    parser.add_argument("--fair_protocol", type=str2bool, default=False)
+    parser.add_argument("--fair_optimizer", type=str, default="adamw", choices=["adamw", "sgd"])
+    parser.add_argument("--fair_peft_lr", type=float, default=5e-3)
+    parser.add_argument("--fair_full_lr", type=float, default=1e-4)
+    parser.add_argument("--fair_linear_lr", type=float, default=1e-1)
+    parser.add_argument("--fair_weight_decay", type=float, default=1e-4)
+    parser.add_argument("--fair_warmup_epochs", type=int, default=5)
+    parser.add_argument("--fair_min_lr", type=float, default=1e-6)
 
     # Augmentation / preprocessing
     parser.add_argument("--color_jitter", type=float, default=0.0)
@@ -261,6 +288,7 @@ def get_args_parser():
     parser.add_argument("--log_dir", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--split_seed", default=42, type=int, help="Dataset split seed independent of optimization seed.")
     parser.add_argument("--deterministic", type=str2bool, default=False, help="Use deterministic PyTorch algorithms when available.")
 
     parser.add_argument("--resume", default="")
@@ -305,7 +333,23 @@ def canonicalize_args(args):
     else:
         args.freeze_backbone = True
 
-    if args.optimizer == "auto":
+    if args.fair_protocol:
+        # One controlled optimization recipe for every PEFT baseline and TRSO.
+        # Only full fine-tuning and linear probing use their explicitly allowed LRs.
+        args.paper_hparams = False
+        args.legacy_auto_hparams = False
+        args.optimizer = args.fair_optimizer
+        if args.tuning_method == "full":
+            args.lr = float(args.fair_full_lr)
+        elif args.tuning_method == "linear":
+            args.lr = float(args.fair_linear_lr)
+        else:
+            args.lr = float(args.fair_peft_lr)
+        args.weight_decay = float(args.fair_weight_decay)
+        args.weight_decay_adapter = float(args.fair_weight_decay)
+        args.warmup_epochs = int(args.fair_warmup_epochs)
+        args.min_lr = float(args.fair_min_lr)
+    elif args.optimizer == "auto":
         args.optimizer = "sgd" if args.tuning_method in {"prompt", "bam", "residual", "sidetune"} else "adamw"
     if args.paper_hparams:
         if args.tuning_method == "prompt":
@@ -335,13 +379,21 @@ def canonicalize_args(args):
         raise ValueError("--trso_parameter_budget cannot be negative.")
     if args.trso_noise_beta < 0:
         raise ValueError("--trso_noise_beta cannot be negative.")
+    if args.adaptformer_dim <= 0:
+        raise ValueError("--adaptformer_dim must be positive.")
+    if args.adaptformer_dropout < 0 or args.adaptformer_dropout >= 1:
+        raise ValueError("--adaptformer_dropout must be in [0, 1).")
+    if args.piggyback_mask_scale < 0:
+        raise ValueError("--piggyback_mask_scale cannot be negative.")
     if not (0.0 < float(args.val_ratio) < 1.0):
         raise ValueError("--val_ratio must be in (0, 1).")
     if args.task in {"multilabel", "regression"} and (args.mixup > 0 or args.cutmix > 0 or args.cutmix_minmax is not None):
         raise ValueError("Mixup/CutMix is currently supported only for single-label classification.")
-    paper_classification_only = {"prompt", "conv", "adapter", "bam", "residual", "ssf", "lora", "bitfit", "sidetune"}
-    if args.tuning_method in paper_classification_only and args.task not in {"auto", "classification", "single_label"}:
-        raise ValueError(f"Strict paper baseline '{args.tuning_method}' supports single-label classification only.")
+    # Task compatibility is capability-based. Most feature/weight adapters are
+    # task-head agnostic and can be evaluated on single-label, multi-label, or
+    # regression targets. Visual Prompting remains single-label only because it
+    # requires a source-to-target class mapping in the frozen source logit space.
+    validate_method_task(args.tuning_method, args.task, allow_auto=True)
     return args
 
 
@@ -350,6 +402,50 @@ def save_json_on_master(obj: Dict, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2, default=str)
+
+
+def resolve_input_size_before_dataset(args) -> int:
+    """Resolve --input_size=0 from pretrained metadata before transforms exist.
+
+    Dataset transforms are constructed before the model in this repository, so
+    changing input_size only inside the backbone factory is too late. This
+    resolver keeps every method on a given backbone at the same valid spatial
+    resolution and avoids accidental 96/224 mismatches.
+    """
+    requested = int(getattr(args, "input_size", 224))
+    if requested > 0:
+        return requested
+    if getattr(args, "clip_model", None):
+        return 224  # replaced by the actual CLIP preprocessing metadata later
+
+    source = str(getattr(args, "model_source", "auto") or "auto").lower()
+    backbone = str(getattr(args, "backbone", ""))
+    if source in {"auto", "torchvision"}:
+        try:
+            weights, _ = _resolve_weights_multiapi(backbone, getattr(args, "weights", "DEFAULT"))
+            if weights is not None and weights != "legacy_pretrained":
+                crop = weights.transforms().crop_size
+                size = int(crop[0] if isinstance(crop, (tuple, list)) else crop)
+                if size > 0:
+                    args.input_size = size
+                    return size
+        except Exception:
+            pass
+    if source in {"auto", "timm"}:
+        try:
+            import timm
+            cfg = timm.models.get_pretrained_cfg(backbone)
+            input_shape = getattr(cfg, "input_size", None) if cfg is not None else None
+            if input_shape and len(input_shape) >= 3:
+                size = int(input_shape[-1])
+                if size > 0:
+                    args.input_size = size
+                    return size
+        except Exception:
+            pass
+    args.input_size = 224
+    print(f"[Warn] Could not infer native input size for {backbone!r}; using 224.")
+    return 224
 
 
 def _resolve_weights_multiapi(backbone: str, weights_str: str):
@@ -424,6 +520,56 @@ def _extract_checkpoint_model(ckpt: dict, model_key: str):
         if mk in ckpt:
             return ckpt[mk]
     return ckpt
+
+
+def load_matching_head(model: nn.Module, checkpoint_path: str, model_key: str = "model|module", strict: bool = True) -> int:
+    """Load a shared task head before method calibration/optimizer construction.
+
+    Fair suites use one head-only checkpoint per backbone and seed so all PEFT
+    methods begin from the same task-aware classifier.  This is especially
+    important for response-based TRSO calibration.
+    """
+    if not checkpoint_path:
+        return 0
+    checkpoint = safe_torch_load(checkpoint_path, map_location="cpu")
+    source = _extract_checkpoint_model(checkpoint, model_key) if isinstance(checkpoint, dict) else checkpoint
+    if not isinstance(source, dict):
+        raise TypeError(f"Head checkpoint does not contain a state dictionary: {checkpoint_path}")
+    target = model.state_dict()
+    matched = {}
+    source_heads = {
+        _strip_wrapper_prefixes(name): value
+        for name, value in source.items()
+        if _is_head_key(name) and hasattr(value, "shape")
+    }
+    target_heads = {name: value for name, value in target.items() if _is_head_key(name)}
+    for raw_name, value in source_heads.items():
+        for name in (raw_name, _strip_wrapper_prefixes(raw_name)):
+            if name in target_heads and target_heads[name].shape == value.shape:
+                matched[name] = value
+                break
+    # Wrapper baselines may rename the same classifier (for example fc -> head).
+    # Match remaining tensors only when shape and weight/bias suffix identify a
+    # unique source tensor, avoiding accidental loading into unrelated layers.
+    for target_name, target_value in target_heads.items():
+        if target_name in matched:
+            continue
+        suffix = target_name.rsplit(".", 1)[-1]
+        candidates = [
+            value for source_name, value in source_heads.items()
+            if source_name.rsplit(".", 1)[-1] == suffix and value.shape == target_value.shape
+        ]
+        if len(candidates) == 1:
+            matched[target_name] = candidates[0]
+    if not matched:
+        message = f"No compatible task-head parameters found in {checkpoint_path}"
+        if strict:
+            raise RuntimeError(message)
+        print(f"[Warn] {message}")
+        return 0
+    model.load_state_dict(matched, strict=False)
+    print(f"[Fair Head] Loaded {len(matched)} task-head tensors from {checkpoint_path}")
+    return len(matched)
 
 
 def safe_torch_load(path, map_location="cpu"):
@@ -641,7 +787,12 @@ def _build_torchvision_or_hub_backbone(args):
             ) from exc
         if args.backbone not in set(timm.list_models(pretrained=False)):
             raise RuntimeError(f"Backbone '{args.backbone}' is not available in timm.")
-        create_kwargs = {"pretrained": pretrained_flag, "num_classes": int(args.nb_classes)}
+        create_kwargs = {"pretrained": pretrained_flag}
+        # Original visual prompting keeps the pretrained source classifier and
+        # applies a fixed source-to-target label mapping. Other methods replace
+        # the task head with the downstream class count.
+        if args.tuning_method != "prompt":
+            create_kwargs["num_classes"] = int(args.nb_classes)
         try:
             model_backbone = timm.create_model(args.backbone, img_size=int(args.input_size), **create_kwargs)
         except TypeError:
@@ -691,26 +842,44 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
         except TypeError:
             return make_adapter(out_ch)
 
-    def attach(module: nn.Module, out_ch: int, layout: str = "auto", grid_size=None):
+    def attach(
+        module: nn.Module,
+        out_ch: int,
+        layout: str = "auto",
+        grid_size=None,
+        hook_mode: str = "post",
+    ):
         if hasattr(module, "pet_adapter"):
             return
         module.add_module("pet_adapter", build_adapter(out_ch, layout=layout, grid_size=grid_size))
 
-        def hook(mod, inputs, out):
-            adapter = mod.pet_adapter
-            if getattr(adapter, "is_trso_adapter", False):
-                return adapter(out)
-            if getattr(adapter, "is_bam_adapter", False):
-                return adapter(out)
-            if args.tuning_method in ("conv", "adapter"):
-                return out + args.adapt_scale * adapter(out)
-            if args.tuning_method == "residual":
-                return out + adapter(out)
-            if args.tuning_method == "ssf":
-                return adapter(out)
-            return out
+        if hook_mode == "pre":
+            # For class-token ViTs, spatial patch updates must occur before the
+            # block attention so they can influence the class token. A
+            # post-hook after the final block cannot affect classification.
+            def pre_hook(mod, inputs):
+                if not inputs:
+                    return inputs
+                adapted = mod.pet_adapter(inputs[0])
+                return (adapted, *inputs[1:])
 
-        module.register_forward_hook(hook)
+            module.register_forward_pre_hook(pre_hook)
+        else:
+            def hook(mod, inputs, out):
+                adapter = mod.pet_adapter
+                if getattr(adapter, "is_trso_adapter", False):
+                    return adapter(out)
+                if getattr(adapter, "is_bam_adapter", False):
+                    return adapter(out)
+                if args.tuning_method in ("conv", "adapter"):
+                    return out + args.adapt_scale * adapter(out)
+                if args.tuning_method == "residual":
+                    return out + adapter(out)
+                if args.tuning_method == "ssf":
+                    return adapter(out)
+                return out
+
+            module.register_forward_hook(hook)
         attached.append(module)
 
     # Snapshot modules before adding adapters to avoid recursive insertion.
@@ -736,7 +905,7 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
                 attach(m, last_conv.out_channels, layout="bchw")
         elif TVEncoderBlock and isinstance(m, TVEncoderBlock):
             dim = int(m.ln_1.normalized_shape[0])
-            attach(m, dim, layout="bnc")
+            attach(m, dim, layout="bnc", hook_mode="pre")
         elif TVSwinBlock and isinstance(m, TVSwinBlock):
             dim = int(m.norm1.normalized_shape[0])
             attach(m, dim, layout="bhwc")
@@ -749,7 +918,7 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
             if "vision_transformer" in module_path and class_name == "block" and hasattr(m, "norm1"):
                 shape = getattr(m.norm1, "normalized_shape", None)
                 if shape:
-                    attach(m, int(shape[0]), layout="bnc")
+                    attach(m, int(shape[0]), layout="bnc", hook_mode="pre")
             # timm Swin blocks use either BHWC or flattened BNC depending on version.
             elif "swin_transformer" in module_path and "block" in class_name and hasattr(m, "norm1"):
                 shape = getattr(m.norm1, "normalized_shape", None)
@@ -826,6 +995,33 @@ def _add_adapters(model_backbone: nn.Module, args):
         )
         print(f"[LoRA] wrapped {count} Transformer Q/V attention projections.")
 
+    elif method == "adaptformer":
+        from models.tuning_modules.adaptformer import apply_adaptformer
+        records = apply_adaptformer(
+            model_backbone,
+            bottleneck=args.adaptformer_dim,
+            dropout=args.adaptformer_dropout,
+            scale=args.adaptformer_scale,
+            layernorm_option=args.adaptformer_layernorm,
+        )
+        print(f"[AdaptFormer] inserted {len(records)} parallel FFN adapters.")
+
+    elif method == "piggyback":
+        from models.tuning_modules.piggyback import apply_piggyback, piggyback_storage
+        records = apply_piggyback(
+            model_backbone,
+            threshold=args.piggyback_threshold,
+            mask_init=args.piggyback_mask_init,
+            mask_scale=args.piggyback_mask_scale,
+            mask_linear=bool(args.piggyback_mask_linear),
+            exclude_task_head=True,
+        )
+        storage = piggyback_storage(model_backbone)
+        print(
+            f"[Piggyback] masked {len(records)} operations / {storage.masked_weights:,} weights; "
+            f"deployed mask={storage.deployed_mask_megabytes:.3f} MiB."
+        )
+
     else:
         raise ValueError(
             f"Unsupported strict paper baseline: {method}. "
@@ -861,7 +1057,8 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
         if not any(parameter.requires_grad for parameter in model.parameters()):
             raise RuntimeError("Visual prompting produced no trainable prompt parameters")
         model.backbone.eval()
-        args.weight_decay = 0.0
+        if not getattr(args, "fair_protocol", False):
+            args.weight_decay = 0.0
         return model
 
     if method == "bam":
@@ -901,7 +1098,19 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
             train_head=bool(args.bitfit_train_head),
             bias_scope=getattr(args, "bitfit_bias_scope", "all"),
         )
-        args.weight_decay = 0.0
+        if not getattr(args, "fair_protocol", False):
+            args.weight_decay = 0.0
+        return model
+
+    if method == "adaptformer":
+        from models.tuning_modules.adaptformer import set_adaptformer_trainability
+        set_adaptformer_trainability(model)
+        return model
+
+    if method == "piggyback":
+        from models.tuning_modules.piggyback import set_piggyback_trainability
+        set_piggyback_trainability(model, train_head=bool(args.piggyback_train_head))
+        _freeze_batchnorm(model)
         return model
 
     if method == "sidetune":
@@ -1155,6 +1364,74 @@ def build_samplers(args, dataset_train, dataset_val, dataset_test):
     return sampler_train, eval_sampler(dataset_val), eval_sampler(dataset_test)
 
 
+
+@torch.no_grad()
+def calibrate_prompt_frequency_mapping(
+    model: nn.Module,
+    data_loader,
+    device: torch.device,
+    num_classes: int,
+    max_batches: int = 0,
+) -> dict:
+    """Estimate a one-to-one source/target label map from training data.
+
+    Counts are collected from the frozen pretrained classifier without an
+    input prompt. A maximum-weight rectangular assignment then selects one
+    unique source logit for every downstream class. Only training examples are
+    used; validation and test labels never participate.
+    """
+    from models.tuning_modules.prompter import VisualPromptingClassifier
+
+    if not isinstance(model, VisualPromptingClassifier):
+        raise TypeError("Frequency mapping requires VisualPromptingClassifier")
+    backbone = model.backbone
+    was_training = backbone.training
+    backbone.eval()
+    counts = None
+    seen = torch.zeros(int(num_classes), dtype=torch.long, device=device)
+    for batch_index, batch in enumerate(data_loader):
+        if max_batches > 0 and batch_index >= int(max_batches):
+            break
+        images, targets = batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True).long()
+        logits = backbone(images)
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]
+        if logits.ndim != 2:
+            raise RuntimeError(f"Prompt source classifier must return [B,K], got {tuple(logits.shape)}")
+        if logits.shape[1] < int(num_classes):
+            raise RuntimeError("Source classifier has fewer outputs than downstream classes")
+        if counts is None:
+            counts = torch.zeros(int(num_classes), int(logits.shape[1]), dtype=torch.long, device=device)
+        predictions = logits.argmax(dim=1)
+        valid = (targets >= 0) & (targets < int(num_classes))
+        flat = targets[valid] * counts.shape[1] + predictions[valid]
+        counts.view(-1).scatter_add_(0, flat, torch.ones_like(flat, dtype=counts.dtype))
+        seen.scatter_add_(0, targets[valid], torch.ones_like(targets[valid], dtype=seen.dtype))
+
+    if counts is None:
+        raise RuntimeError("Prompt frequency mapping received no training batches")
+    if utils.is_dist_avail_and_initialized():
+        torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(seen, op=torch.distributed.ReduceOp.SUM)
+    if (seen == 0).any():
+        missing = torch.where(seen == 0)[0].tolist()
+        raise RuntimeError(f"Prompt mapping did not observe target classes {missing}")
+
+    from scipy.optimize import linear_sum_assignment
+    rows, cols = linear_sum_assignment(-counts.cpu().numpy())
+    mapping = torch.empty(int(num_classes), dtype=torch.long)
+    mapping[torch.as_tensor(rows, dtype=torch.long)] = torch.as_tensor(cols, dtype=torch.long)
+    model.output_indices.copy_(mapping.to(model.output_indices.device))
+    backbone.train(was_training)
+    selected_counts = counts.cpu()[torch.arange(int(num_classes)), mapping]
+    return {
+        "strategy": "frequency_hungarian",
+        "output_indices": mapping.tolist(),
+        "class_support": seen.cpu().tolist(),
+        "selected_frequency": selected_counts.tolist(),
+        "mapping_precision": float(selected_counts.sum().item() / max(1, seen.sum().item())),
+    }
+
 def _parse_prompt_indices(value: str, num_classes: int):
     text = str(value or "").strip()
     if not text:
@@ -1273,7 +1550,10 @@ def main(args):
 
     if args.list_compatibility:
         for row in compatibility_rows():
-            print(f"{row['method']:12s} | {','.join(row['families']):45s} | {row['implementation_scope']}")
+            print(
+                f"{row['method']:12s} | families={','.join(row['families']):38s} "
+                f"| tasks={','.join(row['tasks']):34s} | {row['implementation_scope']}"
+            )
         return
 
     if args.list_backbones:
@@ -1320,6 +1600,9 @@ def main(args):
     else:
         cudnn.benchmark = device.type == "cuda"
 
+    # Resolve automatic spatial size before dataset transforms are constructed.
+    resolve_input_size_before_dataset(args)
+
     clip_preprocess = None
     clip_visual = None
     clip_feat_dim = None
@@ -1355,6 +1638,25 @@ def main(args):
             args.input_size = _infer_clip_input_size(clip_preprocess)
 
     dataset_train, dataset_val, dataset_test = build_datasets(args)
+    # Dataset construction resolves --task=auto and output dimensionality. Check
+    # the actual task before model construction so unsupported combinations do
+    # not fail halfway through an experiment.
+    validate_method_task(args.tuning_method, args.task_type, allow_auto=False)
+
+    if args.output_dir and utils.is_main_process():
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        dataset_protocol = {
+            "dataset": args.dataset,
+            "task_type": args.task_type,
+            "output_dim": int(args.nb_classes),
+            "split_seed": int(args.split_seed),
+            "train_samples": len(dataset_train),
+            "validation_samples": 0 if dataset_val is None else len(dataset_val),
+            "test_samples": 0 if dataset_test is None else len(dataset_test),
+            "allow_val_as_test": bool(args.allow_val_as_test),
+            "input_size": int(args.input_size),
+        }
+        save_json_on_master(dataset_protocol, os.path.join(args.output_dir, "dataset_protocol.json"))
 
     if args.clip_model and clip_preprocess is not None:
         for ds in (dataset_train, dataset_val, dataset_test):
@@ -1435,6 +1737,39 @@ def main(args):
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         save_json_on_master(vars(args), os.path.join(args.output_dir, "args.json"))
+        protocol = {
+            "fair_protocol": bool(args.fair_protocol),
+            "optimizer": args.optimizer,
+            "scheduler": "cosine",
+            "learning_rate": float(args.lr),
+            "weight_decay": float(args.weight_decay),
+            "adapter_weight_decay": float(args.weight_decay_adapter),
+            "warmup_epochs": int(args.warmup_epochs),
+            "warmup_steps": int(args.warmup_steps),
+            "minimum_learning_rate": float(args.min_lr),
+            "epochs": int(args.epochs),
+            "batch_size": int(args.batch_size),
+            "update_frequency": int(args.update_freq),
+            "augmentation": {
+                "train_aug": args.train_aug, "mixup": args.mixup, "cutmix": args.cutmix,
+                "color_jitter": args.color_jitter, "auto_augment": args.aa,
+                "random_erasing": args.reprob, "label_smoothing": args.smoothing,
+            },
+            "dataset": args.dataset,
+            "task_type": args.task_type,
+            "backbone": args.backbone,
+            "method": args.tuning_method,
+            "seed": int(args.seed),
+            "split_seed": int(args.split_seed),
+        }
+        # This fingerprint is identical for all PEFT rows in a controlled suite
+        # except for method/backbone/seed metadata and method-specific structure.
+        import hashlib
+        fairness_fields = {k: v for k, v in protocol.items() if k not in {"method", "seed"}}
+        protocol["protocol_fingerprint"] = hashlib.sha256(
+            json.dumps(fairness_fields, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        save_json_on_master(protocol, os.path.join(args.output_dir, "resolved_protocol.json"))
 
     # Optional finetune checkpoint.
     if args.finetune:
@@ -1447,10 +1782,31 @@ def main(args):
                 del checkpoint_model[k]
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
 
+    # Shared task-aware head must be loaded before TRSO response calibration.
+    # Resume checkpoints take precedence and are loaded immediately afterward.
+    if args.head_from:
+        load_matching_head(model, args.head_from, args.model_key, strict=True)
 
     # Load model state before TRSO calibration and before optimizer construction.
     # This is required because active TRSO ranks determine the trainable parameter set.
     resume_checkpoint = utils.load_model_for_resume(args, model, strict=True)
+
+    if (
+        args.tuning_method == "prompt"
+        and resume_checkpoint is None
+        and not args.prompt_output_indices
+        and args.prompt_mapping == "frequency"
+    ):
+        mapping_report = calibrate_prompt_frequency_mapping(
+            model,
+            data_loader_train,
+            device,
+            args.nb_classes,
+            max_batches=args.prompt_mapping_batches,
+        )
+        print(f"[VisualPrompt] frequency mapping precision={mapping_report['mapping_precision']:.4f}")
+        if args.output_dir and utils.is_main_process():
+            save_json_on_master(mapping_report, os.path.join(args.output_dir, "prompt_mapping.json"))
 
     if args.tuning_method == "trso":
         if resume_checkpoint is None:
@@ -1507,6 +1863,24 @@ def main(args):
     n_total = sum(p.numel() for p in model_without_ddp.parameters())
     print(f"Number of trainable params: {n_trainable:,}")
     print(f"Number of total params: {n_total:,}")
+    parameter_summary = {
+        "trainable_params": int(n_trainable),
+        "total_params": int(n_total),
+        "trainable_ratio": float(n_trainable / max(1, n_total)),
+        "method": args.tuning_method,
+        "backbone": args.backbone,
+    }
+    if args.tuning_method == "piggyback":
+        from models.tuning_modules.piggyback import piggyback_storage
+        storage = piggyback_storage(model_without_ddp)
+        parameter_summary.update({
+            "piggyback_masked_weights": storage.masked_weights,
+            "piggyback_deployed_mask_bits": storage.deployed_mask_bits,
+            "piggyback_deployed_mask_megabytes": storage.deployed_mask_megabytes,
+            "piggyback_training_score_megabytes_fp32": storage.training_score_megabytes_fp32,
+        })
+    if args.output_dir:
+        save_json_on_master(parameter_summary, os.path.join(args.output_dir, "parameter_summary.json"))
 
     total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
     num_training_steps_per_epoch = max(
@@ -1522,7 +1896,7 @@ def main(args):
     for name, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-        is_adapter_like = any(tok in name for tok in ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adapter", "side", "tuning_module", "prompt")) or id(p) in adapter_param_ids
+        is_adapter_like = any(tok in name for tok in ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adaptformer", "piggyback", "mask_scores", "adapter", "side", "tuning_module", "prompt")) or id(p) in adapter_param_ids
         (adapter_like if is_adapter_like else other).append(p)
     print(f"[ParamGroups] adapter_like={sum(p.numel() for p in adapter_like):,} others={sum(p.numel() for p in other):,}")
 
@@ -1562,19 +1936,6 @@ def main(args):
         args, resume_checkpoint, optimizer, loss_scaler, model_ema
     )
 
-    if args.head_from:
-        head_ckpt = safe_torch_load(args.head_from, map_location="cpu")
-        head_model = _extract_checkpoint_model(head_ckpt, args.model_key)
-        model_sd = model_without_ddp.state_dict()
-        to_load = {
-            k: v for k, v in head_model.items()
-            if _is_head_key(k) and k in model_sd and hasattr(v, "shape") and v.shape == model_sd[k].shape
-        }
-        if to_load:
-            model_without_ddp.load_state_dict(to_load, strict=False)
-            print(f"[Info] Loaded {len(to_load)} head params from {args.head_from}")
-        else:
-            print(f"[Warn] --head_from provided but no matching head keys were found: {args.head_from}")
 
     metric_name, maximize_metric = primary_metric(args.task_type)
 

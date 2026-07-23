@@ -214,17 +214,209 @@ def _binary_average_precision(scores: torch.Tensor, targets: torch.Tensor) -> fl
     return float((precision * sorted_targets).sum().item() / positives)
 
 
-def _multilabel_metrics(logits: torch.Tensor, targets: torch.Tensor):
+def _multilabel_metrics(logits: torch.Tensor, targets: torch.Tensor, ece_bins: int = 15):
+    """Comprehensive multi-label metrics from the complete prediction set.
+
+    Thresholded metrics use 0.5. Percentage-valued metrics follow the 0--100
+    convention used by classification accuracy. Per-class diagnostics are kept
+    in JSON rather than collapsed into a single opaque score.
+    """
+    logits = logits.float()
+    targets = targets.float()
     probabilities = logits.sigmoid()
     predictions = probabilities >= 0.5
     truth = targets >= 0.5
-    tp = (predictions & truth).sum().float()
-    fp = (predictions & ~truth).sum().float()
-    fn = (~predictions & truth).sum().float()
-    micro_f1 = (2 * tp / (2 * tp + fp + fn).clamp_min(1)).item() * 100.0
+
+    tp_c = (predictions & truth).sum(dim=0).float()
+    fp_c = (predictions & ~truth).sum(dim=0).float()
+    fn_c = (~predictions & truth).sum(dim=0).float()
+    support = truth.sum(dim=0).float()
+    precision_c = tp_c / (tp_c + fp_c).clamp_min(1.0)
+    recall_c = tp_c / (tp_c + fn_c).clamp_min(1.0)
+    f1_c = 2.0 * precision_c * recall_c / (precision_c + recall_c).clamp_min(1e-12)
+    valid = support > 0
+
+    tp = tp_c.sum()
+    fp = fp_c.sum()
+    fn = fn_c.sum()
+    micro_precision = tp / (tp + fp).clamp_min(1.0)
+    micro_recall = tp / (tp + fn).clamp_min(1.0)
+    micro_f1 = 2.0 * micro_precision * micro_recall / (micro_precision + micro_recall).clamp_min(1e-12)
+    macro_precision = precision_c[valid].mean() if valid.any() else torch.tensor(0.0)
+    macro_recall = recall_c[valid].mean() if valid.any() else torch.tensor(0.0)
+    macro_f1 = f1_c[valid].mean() if valid.any() else torch.tensor(0.0)
+    weighted_f1 = (f1_c * support).sum() / support.sum().clamp_min(1.0)
+
     aps = [_binary_average_precision(probabilities[:, c], truth[:, c]) for c in range(probabilities.shape[1])]
-    valid = [value for value in aps if not math.isnan(value)]
-    return {"map": 100.0 * sum(valid) / max(1, len(valid)), "micro_f1": micro_f1}
+    valid_aps = [value for value in aps if not math.isnan(value)]
+    subset_accuracy = predictions.eq(truth).all(dim=1).float().mean()
+    hamming_accuracy = predictions.eq(truth).float().mean()
+    label_cardinality_error = (predictions.sum(dim=1).float() - truth.sum(dim=1).float()).abs().mean()
+    brier = (probabilities - targets).square().mean()
+
+    flat_confidence = torch.maximum(probabilities, 1.0 - probabilities).flatten()
+    flat_correct = predictions.eq(truth).float().flatten()
+    ece = torch.tensor(0.0)
+    boundaries = torch.linspace(0.0, 1.0, int(ece_bins) + 1)
+    for lower, upper in zip(boundaries[:-1], boundaries[1:]):
+        in_bin = (flat_confidence > lower) & (flat_confidence <= upper)
+        if in_bin.any():
+            ece += in_bin.float().mean() * (flat_correct[in_bin].mean() - flat_confidence[in_bin].mean()).abs()
+
+    scalar = {
+        "map": 100.0 * sum(valid_aps) / max(1, len(valid_aps)),
+        "micro_precision": float(micro_precision.item() * 100.0),
+        "micro_recall": float(micro_recall.item() * 100.0),
+        "micro_f1": float(micro_f1.item() * 100.0),
+        "macro_precision": float(macro_precision.item() * 100.0),
+        "macro_recall": float(macro_recall.item() * 100.0),
+        "macro_f1": float(macro_f1.item() * 100.0),
+        "weighted_f1": float(weighted_f1.item() * 100.0),
+        "subset_accuracy": float(subset_accuracy.item() * 100.0),
+        "hamming_accuracy": float(hamming_accuracy.item() * 100.0),
+        "label_cardinality_error": float(label_cardinality_error.item()),
+        "ece": float(ece.item() * 100.0),
+        "brier_score": float(brier.item()),
+        "mean_confidence": float(flat_confidence.mean().item() * 100.0),
+        "num_samples": int(targets.shape[0]),
+        "num_labels": int(targets.shape[1]),
+    }
+    diagnostic = {
+        "per_class_average_precision": [None if math.isnan(value) else float(value * 100.0) for value in aps],
+        "per_class_precision": [float(value * 100.0) for value in precision_c.tolist()],
+        "per_class_recall": [float(value * 100.0) for value in recall_c.tolist()],
+        "per_class_f1": [float(value * 100.0) for value in f1_c.tolist()],
+        "per_class_support": [int(value) for value in support.tolist()],
+    }
+    return scalar, diagnostic
+
+
+def _rankdata(values: torch.Tensor) -> torch.Tensor:
+    """Average ranks for a one-dimensional tensor, including ties."""
+    values = values.flatten().float()
+    order = torch.argsort(values, stable=True)
+    sorted_values = values[order]
+    ranks = torch.empty_like(values)
+    i = 0
+    while i < sorted_values.numel():
+        j = i + 1
+        while j < sorted_values.numel() and bool(sorted_values[j] == sorted_values[i]):
+            j += 1
+        average_rank = 0.5 * ((i + 1) + j)
+        ranks[order[i:j]] = average_rank
+        i = j
+    return ranks
+
+
+def _correlation(x: torch.Tensor, y: torch.Tensor) -> float:
+    x = x.flatten().float()
+    y = y.flatten().float()
+    x = x - x.mean()
+    y = y - y.mean()
+    denominator = x.square().sum().sqrt() * y.square().sum().sqrt()
+    if denominator <= 1e-12:
+        return float("nan")
+    return float((x * y).sum().item() / denominator.item())
+
+
+def _regression_metrics(predictions: torch.Tensor, targets: torch.Tensor):
+    predictions = predictions.float()
+    targets = targets.float()
+    if predictions.ndim == 1:
+        predictions = predictions.unsqueeze(1)
+        targets = targets.unsqueeze(1)
+    error = predictions - targets
+    absolute = error.abs()
+    squared = error.square()
+    mae_per_output = absolute.mean(dim=0)
+    rmse_per_output = squared.mean(dim=0).sqrt()
+    target_mean = targets.mean(dim=0, keepdim=True)
+    ss_res = squared.sum(dim=0)
+    ss_tot = (targets - target_mean).square().sum(dim=0)
+    r2_per_output = 1.0 - ss_res / ss_tot.clamp_min(1e-12)
+    pearson_per_output = [_correlation(predictions[:, i], targets[:, i]) for i in range(predictions.shape[1])]
+    spearman_per_output = [
+        _correlation(_rankdata(predictions[:, i]), _rankdata(targets[:, i]))
+        for i in range(predictions.shape[1])
+    ]
+    finite_pearson = [value for value in pearson_per_output if not math.isnan(value)]
+    finite_spearman = [value for value in spearman_per_output if not math.isnan(value)]
+    scalar = {
+        "mae": float(absolute.mean().item()),
+        "median_absolute_error": float(absolute.median().item()),
+        "rmse": float(squared.mean().sqrt().item()),
+        "r2": float(r2_per_output.mean().item()),
+        "pearson": float(sum(finite_pearson) / max(1, len(finite_pearson))),
+        "spearman": float(sum(finite_spearman) / max(1, len(finite_spearman))),
+        "num_samples": int(targets.shape[0]),
+        "output_dim": int(targets.shape[1]),
+    }
+    diagnostic = {
+        "per_output_mae": [float(value) for value in mae_per_output.tolist()],
+        "per_output_rmse": [float(value) for value in rmse_per_output.tolist()],
+        "per_output_r2": [float(value) for value in r2_per_output.tolist()],
+        "per_output_pearson": [None if math.isnan(value) else float(value) for value in pearson_per_output],
+        "per_output_spearman": [None if math.isnan(value) else float(value) for value in spearman_per_output],
+    }
+    return scalar, diagnostic
+
+def _single_label_detailed_metrics(logits: torch.Tensor, targets: torch.Tensor, ece_bins: int = 15):
+    """Compute classification metrics from the complete prediction set.
+
+    Percent-valued metrics use the same 0--100 convention as Acc@1/Acc@5.
+    Non-scalar diagnostics are returned separately for JSON reporting.
+    """
+    logits = logits.float()
+    targets = targets.long().view(-1)
+    num_classes = int(logits.shape[1])
+    probabilities = logits.softmax(dim=1)
+    confidence, predictions = probabilities.max(dim=1)
+    encoded = targets * num_classes + predictions
+    confusion = torch.bincount(encoded, minlength=num_classes * num_classes).reshape(num_classes, num_classes)
+    confusion_f = confusion.float()
+    support = confusion_f.sum(dim=1)
+    predicted_count = confusion_f.sum(dim=0)
+    true_positive = confusion_f.diag()
+    recall = true_positive / support.clamp_min(1.0)
+    precision = true_positive / predicted_count.clamp_min(1.0)
+    f1 = 2.0 * precision * recall / (precision + recall).clamp_min(1e-12)
+    valid = support > 0
+    macro_precision = precision[valid].mean() if valid.any() else torch.tensor(0.0)
+    macro_recall = recall[valid].mean() if valid.any() else torch.tensor(0.0)
+    macro_f1 = f1[valid].mean() if valid.any() else torch.tensor(0.0)
+    weighted_f1 = (f1 * support).sum() / support.sum().clamp_min(1.0)
+
+    correctness = predictions.eq(targets).float()
+    ece = torch.tensor(0.0)
+    boundaries = torch.linspace(0.0, 1.0, int(ece_bins) + 1)
+    for lower, upper in zip(boundaries[:-1], boundaries[1:]):
+        in_bin = (confidence > lower) & (confidence <= upper)
+        if in_bin.any():
+            ece += in_bin.float().mean() * (correctness[in_bin].mean() - confidence[in_bin].mean()).abs()
+
+    one_hot = torch.nn.functional.one_hot(targets, num_classes=num_classes).float()
+    brier = (probabilities - one_hot).square().sum(dim=1).mean()
+    scalar = {
+        "macro_precision": float(macro_precision.item() * 100.0),
+        "macro_recall": float(macro_recall.item() * 100.0),
+        "macro_f1": float(macro_f1.item() * 100.0),
+        "weighted_f1": float(weighted_f1.item() * 100.0),
+        "balanced_accuracy": float(macro_recall.item() * 100.0),
+        "ece": float(ece.item() * 100.0),
+        "mean_confidence": float(confidence.mean().item() * 100.0),
+        "brier_score": float(brier.item()),
+        "num_samples": int(targets.numel()),
+        "num_classes": num_classes,
+    }
+    diagnostic = {
+        "per_class_precision": [float(value * 100.0) for value in precision.tolist()],
+        "per_class_recall": [float(value * 100.0) for value in recall.tolist()],
+        "per_class_f1": [float(value * 100.0) for value in f1.tolist()],
+        "per_class_accuracy": [float(value * 100.0) for value in recall.tolist()],
+        "per_class_support": [int(value) for value in support.tolist()],
+        "confusion_matrix": confusion.tolist(),
+    }
+    return scalar, diagnostic
 
 
 @torch.no_grad()
@@ -274,21 +466,26 @@ def evaluate(
             metric_logger.meters["acc1"].update(float(values[0].item()), n=batch_size)
             if len(values) > 1:
                 metric_logger.meters["acc5"].update(float(values[1].item()), n=batch_size)
-        else:
-            outputs.append(output.detach().cpu())
-            targets_all.append(target.detach().cpu())
+        outputs.append(output.detach().cpu())
+        targets_all.append(target.detach().cpu())
         n_images += batch_size
 
-    if task_type != TASK_SINGLE_LABEL and outputs:
+    diagnostic_metrics = {}
+    if outputs:
         prediction_tensor = _distributed_concat(torch.cat(outputs, dim=0))
         target_tensor = _distributed_concat(torch.cat(targets_all, dim=0))
-        if task_type == TASK_MULTILABEL:
-            for key, value in _multilabel_metrics(prediction_tensor, target_tensor).items():
+        if task_type == TASK_SINGLE_LABEL:
+            scalar_metrics, diagnostic_metrics = _single_label_detailed_metrics(prediction_tensor, target_tensor)
+            for key, value in scalar_metrics.items():
+                metric_logger.update(**{key: value})
+        elif task_type == TASK_MULTILABEL:
+            scalar_metrics, diagnostic_metrics = _multilabel_metrics(prediction_tensor, target_tensor)
+            for key, value in scalar_metrics.items():
                 metric_logger.update(**{key: value})
         else:
-            error = prediction_tensor - target_tensor
-            metric_logger.update(mae=float(error.abs().mean().item()))
-            metric_logger.update(rmse=float(error.square().mean().sqrt().item()))
+            scalar_metrics, diagnostic_metrics = _regression_metrics(prediction_tensor, target_tensor)
+            for key, value in scalar_metrics.items():
+                metric_logger.update(**{key: value})
 
     if measure_latency and n_images > 0:
         metric_logger.update(latency_ms_per_image=1000.0 * elapsed_forward / n_images)
@@ -298,10 +495,23 @@ def evaluate(
 
     metric_logger.synchronize_between_processes()
     stats = {key: meter.global_avg for key, meter in metric_logger.meters.items()}
+    stats.update(diagnostic_metrics)
     if task_type == TASK_SINGLE_LABEL:
-        print(f"* Acc@1 {stats.get('acc1', 0):.3f} loss {stats.get('loss', 0):.3f}")
+        print(
+            f"* Acc@1 {stats.get('acc1', 0):.3f} Acc@5 {stats.get('acc5', 0):.3f} "
+            f"macro-F1 {stats.get('macro_f1', 0):.3f} balanced-acc {stats.get('balanced_accuracy', 0):.3f} "
+            f"ECE {stats.get('ece', 0):.3f} loss {stats.get('loss', 0):.3f}"
+        )
     elif task_type == TASK_MULTILABEL:
-        print(f"* mAP {stats.get('map', 0):.3f} micro-F1 {stats.get('micro_f1', 0):.3f} loss {stats.get('loss', 0):.3f}")
+        print(
+            f"* mAP {stats.get('map', 0):.3f} micro-F1 {stats.get('micro_f1', 0):.3f} "
+            f"macro-F1 {stats.get('macro_f1', 0):.3f} subset-acc {stats.get('subset_accuracy', 0):.3f} "
+            f"ECE {stats.get('ece', 0):.3f} loss {stats.get('loss', 0):.3f}"
+        )
     else:
-        print(f"* MAE {stats.get('mae', 0):.5f} RMSE {stats.get('rmse', 0):.5f} loss {stats.get('loss', 0):.5f}")
+        print(
+            f"* MAE {stats.get('mae', 0):.5f} RMSE {stats.get('rmse', 0):.5f} "
+            f"R2 {stats.get('r2', 0):.5f} Pearson {stats.get('pearson', 0):.5f} "
+            f"loss {stats.get('loss', 0):.5f}"
+        )
     return stats

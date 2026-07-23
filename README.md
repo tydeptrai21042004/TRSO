@@ -1,3 +1,7 @@
+# TRSO: universal fair baseline framework
+
+> **Current release:** dataset/task/backbone-aware controlled comparisons, 13 unique method entries (including AdaptFormer and Piggyback), shared-head TRSO calibration, comprehensive metrics, explicit compatibility skips, and automatic fairness verification. See [UNIVERSAL_FAIR_FRAMEWORK.md](UNIVERSAL_FAIR_FRAMEWORK.md).
+
 # Scientific TRSO
 
 > **Strict baseline fidelity:** paper-named baselines now use only their
@@ -48,6 +52,31 @@ python main.py --list_backbones
 See [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) for the method contract,
 [BASELINE_FIDELITY.md](BASELINE_FIDELITY.md) for paper-versus-implementation
 labels, and [DATASETS.md](DATASETS.md) for dataset layouts and split protocols.
+
+## Universal fair all-baseline suite
+
+The recommended runner is dataset/task/backbone aware. It schedules every
+scientifically compatible baseline, records every incompatible pairing as an
+explicit skip, and applies one shared PEFT optimizer, learning rate, cosine
+scheduler, warm-up, augmentation and checkpoint rule. Only full fine-tuning
+and linear probing may use separate learning rates.
+
+```bash
+python -m tools.run_fair_suite \
+  --dataset dtd --task auto --data_path ./data --download True \
+  --backbones resnet50@torchvision,vit_tiny_patch16_224@timm \
+  --methods auto --seeds 0,1,2 --execute
+
+python -m tools.verify_fairness \
+  --manifest experiments/fair_manifest.json \
+  --compatibility experiments/fair_manifest_compatibility.json
+```
+
+Change `--dataset`, `--task`, dataset-specific JSON arguments, and backbones for
+single-label, multi-label, or regression experiments. See
+[UNIVERSAL_FAIR_FRAMEWORK.md](UNIVERSAL_FAIR_FRAMEWORK.md) and
+[UNIVERSAL_RELEASE_CHECKLIST.md](UNIVERSAL_RELEASE_CHECKLIST.md). The older
+DTD-only runner remains as a regression-tested dataset-specific example.
 
 ## 1. Scientific formulation
 
@@ -401,3 +430,11 @@ python -m tools.aggregate_revision_results \
 See `CORRECTIONS_AND_EXPERIMENTS.md` for the full correction log, ablation
 rationale, sweep spaces and fair-comparison checklist.
 
+
+## Kaggle one-cell universal fair benchmark
+
+After pushing this release to GitHub, open
+`kaggle/TRSO_Universal_Fair_OneCell.ipynb` in Kaggle. Configure the dataset,
+task, dataset arguments, backbone list, method list and seeds at the top of the
+single cell. Enable Internet and a GPU. T4 x2 is preferred; independent runs
+are assigned to separate GPUs and every run keeps its own log.

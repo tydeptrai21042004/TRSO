@@ -5,6 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from types import SimpleNamespace
 
 import torch
@@ -13,6 +18,8 @@ from torchvision.models.vision_transformer import VisionTransformer
 
 from main import set_trainability_policy
 from models.tuning_modules.bam_adapter import BAMResNet50
+from models.tuning_modules.adaptformer import apply_adaptformer
+from models.tuning_modules.piggyback import apply_piggyback
 from models.tuning_modules.conv_adapter import apply_conv_adapter_resnet50, set_conv_adapter_trainability
 from models.tuning_modules.lora_transformer import apply_lora_transformer
 from models.tuning_modules.prompter import VisualPromptingClassifier
@@ -69,8 +76,18 @@ def run():
     report["lora"] = step_ok(lora, x)
 
     bitfit = VisionTransformer(image_size=32, patch_size=8, num_layers=1, num_heads=2, hidden_dim=32, mlp_dim=64, num_classes=5)
-    set_trainability_policy(bitfit, SimpleNamespace(tuning_method="bitfit", bitfit_train_head=True, weight_decay=1e-4))
+    set_trainability_policy(bitfit, SimpleNamespace(tuning_method="bitfit", bitfit_train_head=True, weight_decay=1e-4, fair_protocol=False))
     report["bitfit"] = step_ok(bitfit, x)
+
+    adaptformer = VisionTransformer(image_size=32, patch_size=8, num_layers=2, num_heads=2, hidden_dim=32, mlp_dim=64, num_classes=5)
+    apply_adaptformer(adaptformer, bottleneck=4, scale=0.1)
+    set_trainability_policy(adaptformer, SimpleNamespace(tuning_method="adaptformer"))
+    report["adaptformer"] = step_ok(adaptformer, x)
+
+    piggyback = resnet18(weights=None, num_classes=5)
+    apply_piggyback(piggyback, threshold=5e-3, mask_init="ones")
+    set_trainability_policy(piggyback, SimpleNamespace(tuning_method="piggyback", piggyback_train_head=True))
+    report["piggyback"] = step_ok(piggyback, x)
 
     side = SideTuningClassifier(
         resnet18(weights=None),

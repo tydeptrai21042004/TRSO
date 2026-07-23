@@ -9,3 +9,5 @@ Pillow>=9.5
 matplotlib>=3.7
 tqdm>=4.65
 pytest>=8.0
+
+fvcore>=0.1.5

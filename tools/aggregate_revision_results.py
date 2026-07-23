@@ -72,12 +72,15 @@ def main() -> None:
         val = read_json(os.path.join(run_dir, "eval_summary.json"))
         efficiency = read_json(os.path.join(run_dir, "efficiency_profile.json"))
         convergence = read_json(os.path.join(run_dir, "convergence_summary.json"))
+        parameters = read_json(os.path.join(run_dir, "parameter_summary.json"))
 
         for key in (
             "experiment_suite",
             "experiment_name",
             "experiment_run_id",
             "dataset",
+            "task",
+            "task_type",
             "backbone",
             "tuning_method",
             "seed",
@@ -92,6 +95,7 @@ def main() -> None:
         row.update(flatten_dict("eval", val))
         row.update(flatten_dict("eff", efficiency))
         row.update(flatten_dict("conv", convergence))
+        row.update(flatten_dict("param", parameters))
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -110,6 +114,8 @@ def main() -> None:
         "experiment_name",
         "experiment_run_id",
         "dataset",
+        "task",
+        "task_type",
         "backbone",
         "method",
         "seed",
@@ -121,7 +127,7 @@ def main() -> None:
     metric_columns = _numeric_columns(df, identifiers)
     group_columns = [
         column
-        for column in ("experiment_suite", "experiment_name", "dataset", "backbone", "method")
+        for column in ("experiment_suite", "experiment_name", "dataset", "task_type", "backbone", "method")
         if column in df.columns
     ]
     if not group_columns or not metric_columns:
@@ -132,7 +138,36 @@ def main() -> None:
     mean_std_path = os.path.splitext(output_path)[0] + "_mean_std.csv"
     summary.to_csv(mean_std_path, index=False)
     print(f"Saved mean/std summary: {mean_std_path}")
-    print(summary.head(20).to_string(index=False))
+
+    # Compact paper-facing table. Non-scalar diagnostics remain in the raw CSV
+    # and per-run JSON, while this table emphasizes accuracy, robustness,
+    # calibration, efficiency, and convergence.
+    preferred_metrics = [
+        "test_acc1", "test_acc5", "test_loss", "test_macro_precision",
+        "test_macro_recall", "test_macro_f1", "test_weighted_f1",
+        "test_balanced_accuracy", "test_ece", "test_brier_score",
+        "test_map", "test_micro_precision", "test_micro_recall",
+        "test_micro_f1", "test_subset_accuracy", "test_hamming_accuracy",
+        "test_label_cardinality_error",
+        "test_mae", "test_median_absolute_error", "test_rmse",
+        "test_r2", "test_pearson", "test_spearman",
+        "param_trainable_params", "param_total_params", "param_trainable_ratio",
+        "param_piggyback_deployed_mask_megabytes",
+        "eff_flops_g", "eff_latency_ms_per_image", "eff_fps",
+        "eff_peak_inference_memory_mb", "conv_best_val_acc1",
+        "conv_best_val_map", "conv_best_val_mae", "conv_best_val_rmse",
+        "conv_best_epoch", "conv_total_training_time_sec",
+        "conv_mean_epoch_time_sec", "conv_epochs_to_95pct_best",
+    ]
+    available = [metric for metric in preferred_metrics if metric in metric_columns]
+    if available:
+        compact = df.groupby(group_columns, dropna=False)[available].agg(["mean", "std", "count"]).reset_index()
+        paper_path = os.path.splitext(output_path)[0] + "_paper_metrics.csv"
+        compact.to_csv(paper_path, index=False)
+        print(f"Saved paper metrics: {paper_path}")
+        print(compact.head(30).to_string(index=False))
+    else:
+        print(summary.head(20).to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -25,21 +25,21 @@ DATASET_ARGS = {"dtd_partition": 1}
 
 # Each item is backbone@source. Add/remove groups as needed.
 BACKBONES = "resnet50@torchvision,vit_tiny_patch16_224@timm"
-METHODS = "auto"  # all unique registered baselines; incompatible rows are explicit skips
+METHODS = "linear,trso,full,lora,bitfit,ssf,adaptformer,conv"  # focused high-value comparison
 SEEDS = "0,1,2"
-EPOCHS = 30
+EPOCHS = 50
 BATCH_SIZE = 64
 INPUT_SIZE = 0  # native pretrained resolution, resolved before transforms
-PEFT_LR = 5e-3
+PEFT_LR = 1e-3
 FULL_LR = 1e-4
-LINEAR_LR = 1e-1
+LINEAR_LR = 1e-3
 WEIGHT_DECAY = 1e-4
 WARMUP_EPOCHS = 5
-TRSO_BUDGET = 0  # automatic model-relative V3 budget
+TRSO_BUDGET = 0  # automatic candidate-capacity V3 budget
 RUN_ABLATION = False
 ABLATION_BACKBONE = "resnet50"
 ABLATION_SOURCE = "torchvision"
-RUN_TRSO_V3_SEARCH = True
+RUN_TRSO_V3_SEARCH = False  # enable only after the corrected proposal is verified
 RUN_TESTS = True
 KEEP_CHECKPOINTS = False
 # ----------------------------------------------------------------------------------
@@ -122,6 +122,14 @@ fair_command = [
     "--linear_lr", LINEAR_LR,
     "--weight_decay", WEIGHT_DECAY,
     "--warmup_epochs", WARMUP_EPOCHS,
+    "--augmentation", "strong",
+    "--peft_head_lr_scale", 0.5,
+    "--peft_freeze_head", "False",
+    "--trso_calibration_batches", 16,
+    "--trso_rank", 4,
+    "--trso_basis_trainable", "True",
+    "--trso_auto_budget_ratio", 0.35,
+    "--trso_residual_target", 0.05,
     "--trso_budget", TRSO_BUDGET,
     "--output_root", OUTPUT_ROOT / "comparison",
     "--manifest", manifest,

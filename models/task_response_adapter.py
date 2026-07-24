@@ -269,10 +269,16 @@ class TaskResponseSpatialAdapter(nn.Module):
         if self.input_norm not in {"none", "rms"}:
             raise ValueError("input_norm must be none, rms, or auto")
         if calibration_grad_norm == "auto":
-            calibration_grad_norm = "rms" if self.variant == "v3" else "none"
+            # V3 uses one shared normalization factor across every candidate
+            # adapter.  Unlike independent per-layer RMS normalization, this
+            # preserves the relative task-response magnitude between layers,
+            # which is essential for meaningful layer allocation.
+            calibration_grad_norm = "global_rms" if self.variant == "v3" else "none"
         self.calibration_grad_norm = str(calibration_grad_norm).lower()
-        if self.calibration_grad_norm not in {"none", "unit", "rms"}:
-            raise ValueError("calibration_grad_norm must be none, unit, rms, or auto")
+        if self.calibration_grad_norm not in {"none", "unit", "rms", "global_rms"}:
+            raise ValueError(
+                "calibration_grad_norm must be none, unit, rms, global_rms, or auto"
+            )
         if residual_norm == "auto":
             residual_norm = "rms" if self.variant == "v3" else "none"
         self.residual_norm = str(residual_norm).lower()
@@ -554,7 +560,12 @@ class TaskResponseSpatialAdapter(nn.Module):
         self.channel_probe.grad = None
 
     @torch.no_grad()
-    def accumulate_probe_gradient(self) -> None:
+    def accumulate_probe_gradient(
+        self,
+        *,
+        global_squared_norm: Optional[torch.Tensor] = None,
+        global_element_count: Optional[int] = None,
+    ) -> None:
         grad = self.probe_kernel.grad
         channel_grad = self.channel_probe.grad
         detached = grad.detach() if grad is not None else None
@@ -580,6 +591,20 @@ class TaskResponseSpatialAdapter(nn.Module):
                 multiplier = raw_norm.clamp_min(self.eps).reciprocal()
             elif self.calibration_grad_norm == "rms":
                 multiplier = math.sqrt(max(1, element_count)) / raw_norm.clamp_min(self.eps)
+            elif self.calibration_grad_norm == "global_rms":
+                # One multiplier is shared by every layer.  This removes the
+                # arbitrary task-loss scale while retaining cross-layer
+                # response magnitudes.  The fallback keeps direct unit tests
+                # and external one-adapter use backward compatible.
+                if global_squared_norm is None:
+                    reference_norm = raw_norm
+                    reference_count = element_count
+                else:
+                    reference_norm = global_squared_norm.to(
+                        device=raw_norm.device, dtype=raw_norm.dtype
+                    ).clamp_min(0.0).sqrt()
+                    reference_count = int(global_element_count or element_count)
+                multiplier = math.sqrt(max(1, reference_count)) / reference_norm.clamp_min(self.eps)
             else:
                 multiplier = torch.ones_like(raw_norm)
             if detached is not None:
@@ -750,6 +775,8 @@ class TaskResponseSpatialAdapter(nn.Module):
             return energy / max(self.eps, component_noise) / cost
         if mode == "normalized_energy_per_param":
             return energy / activation / cost
+        if mode == "normalized_stable_energy_per_param":
+            return stable_energy / activation / cost
         if mode == "stable_energy":
             return stable_energy
         if mode == "stable_energy_per_param":
@@ -761,7 +788,8 @@ class TaskResponseSpatialAdapter(nn.Module):
         raise ValueError(
             "score_mode must be energy, energy_per_param, energy_per_channel, "
             "noise_adjusted, snr, snr_per_param, normalized_energy_per_param, "
-            "stable_energy, stable_energy_per_param, stability, or stability_per_param"
+            "stable_energy, stable_energy_per_param, normalized_stable_energy_per_param, "
+            "stability, or stability_per_param"
         )
 
     def parameter_cost_for_rank(self, rank: int) -> int:

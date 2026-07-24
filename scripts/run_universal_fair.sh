@@ -12,12 +12,20 @@ python -m tools.run_fair_suite \
   --backbones resnet50@torchvision,vit_tiny_patch16_224@timm \
   --methods auto \
   --seeds 0,1,2 \
-  --epochs 20 \
+  --epochs 50 \
   --input_size 0 \
-  --peft_lr 5e-3 \
+  --peft_lr 1e-3 \
   --full_lr 1e-4 \
-  --linear_lr 1e-1 \
+  --linear_lr 1e-3 \
   --warmup_epochs 5 \
+  --augmentation strong \
+  --peft_freeze_head False \
+  --peft_head_lr_scale 0.5 \
+  --trso_calibration_batches 16 \
+  --trso_auto_budget_ratio 0.35 \
+  --trso_rank 4 \
+  --trso_basis_trainable True \
+  --trso_residual_target 0.05 \
   --weight_decay 1e-4 \
   --manifest experiments/universal_fair_manifest.json \
   --output_root outputs_universal_fair \

@@ -43,7 +43,7 @@ the paper evaluated only classification.
 - `piggyback`: paper defaults are mask score `1e-2`, threshold `5e-3`, frozen
   biases/BN and Adam-family optimization.
 - `sidetune`: use `--sidetune_arch lightweight` for the primary baseline.
-- `trso`: V3 defaults to native resolution (`--input_size 0`), a task-aware shared head, scale-normalized calibration, model-relative automatic budget/calibration sizing, named insertion contracts with recorded generic fallbacks, and pre-block token insertion.
+- `trso`: V3 defaults to native resolution (`--input_size 0`), a task-aware shared head, global-RMS calibration, sparse candidate-capacity allocation, a global residual budget, rank-4 trainable response bases, jointly adapted task head, named insertion contracts with recorded generic fallbacks, and pre-block token insertion.
 
 `adapter` is a legacy alias of `conv` and is not a separate baseline row.
 `lora_conv` is deliberately rejected by the strict factory.

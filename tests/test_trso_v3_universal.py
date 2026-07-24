@@ -153,9 +153,12 @@ def test_fair_suite_uses_v3_universal_defaults():
     assert row["trso_variant"] == "v3"
     assert row["trso_channel_groups"] == 0
     assert row["trso_grouping_mode"] == "response"
-    assert row["trso_calibration_grad_norm"] == "rms"
+    assert row["trso_calibration_grad_norm"] == "global_rms"
     assert row["trso_residual_norm"] == "rms"
-    assert row["trso_score_mode"] == "stable_energy_per_param"
+    assert row["trso_score_mode"] == "normalized_stable_energy_per_param"
+    assert row["trso_spatial_rank"] == 4
+    assert row["trso_basis_trainable"] is True
+    assert row["trso_residual_budget_mode"] == "global"
 
 
 def test_generic_transformer_fallback_handles_square_tokens_with_prefix():

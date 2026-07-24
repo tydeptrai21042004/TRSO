@@ -42,20 +42,20 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--output_root", default="outputs_fair_dtd")
     p.add_argument("--manifest", default="experiments/fair_dtd_manifest.json")
     p.add_argument("--seeds", default="0,1,2")
-    p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--head_epochs", type=int, default=10)
+    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--head_epochs", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--input_size", type=int, default=224)
     p.add_argument("--cnn_backbone", default="resnet50")
     p.add_argument("--transformer_backbone", default="vit_tiny_patch16_224")
-    p.add_argument("--peft_lr", type=float, default=5e-3)
+    p.add_argument("--peft_lr", type=float, default=1e-3)
     p.add_argument("--full_lr", type=float, default=1e-4)
-    p.add_argument("--linear_lr", type=float, default=1e-1)
+    p.add_argument("--linear_lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--warmup_epochs", type=int, default=5)
-    p.add_argument("--trso_budget_cnn", type=int, default=12000)
-    p.add_argument("--trso_budget_transformer", type=int, default=12000)
+    p.add_argument("--trso_budget_cnn", type=int, default=0)
+    p.add_argument("--trso_budget_transformer", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu_ids", default="0", help="Comma-separated GPUs for independent parallel runs, e.g. 0,1.")
     p.add_argument("--parallel_runs", type=int, default=1, help="Maximum concurrent GPU workers.")
@@ -95,13 +95,17 @@ def base_common(args) -> dict:
         "paper_hparams": False,
         "legacy_auto_hparams": False,
         "train_aug": "standard",
-        "aa": "none",
-        "color_jitter": 0.0,
-        "mixup": 0.0,
+        "aa": "rand-m9-mstd0.5-inc1",
+        "color_jitter": 0.2,
+        "mixup": 0.2,
         "cutmix": 0.0,
-        "smoothing": 0.0,
-        "reprob": 0.0,
+        "smoothing": 0.1,
+        "reprob": 0.1,
         "keep_pretrained_head": False,
+        "peft_freeze_head": False,
+        "peft_head_lr_scale": 0.5,
+        "clip_grad": 1.0,
+        "no_decay_bias_norm": True,
         "split_seed": 2026,
     }
 
@@ -148,14 +152,29 @@ def _method_variant(method: str, family: str, seed: int, head_path: str, args) -
         row["head_from"] = head_path
     if method == "trso":
         row.update({
+            "trso_variant": "v3",
             "trso_basis_source": "response",
             "trso_allocation": "exact",
-            "trso_score_mode": "noise_adjusted",
-            "trso_noise_beta": 0.25,
+            "trso_score_mode": "normalized_stable_energy_per_param",
+            "trso_noise_beta": 0.0,
             "trso_parameter_budget": args.trso_budget_cnn if family == "cnn" else args.trso_budget_transformer,
+            "trso_auto_budget_ratio": 0.35,
+            "trso_auto_sparse": True,
             "trso_calibration_batches": 16,
             "trso_kernel_size": 5,
-            "trso_spatial_rank": 2,
+            "trso_spatial_rank": 4,
+            "trso_basis_trainable": True,
+            "trso_coefficient_mode": "grouped",
+            "trso_channel_groups": 0,
+            "trso_grouping_mode": "response",
+            "trso_input_norm": "rms",
+            "trso_calibration_grad_norm": "global_rms",
+            "trso_residual_norm": "rms",
+            "trso_residual_target": 0.05,
+            "trso_residual_budget_mode": "global",
+            "trso_gate_search": True,
+            "trso_gate_search_values": "0.0,0.05,0.1,0.25,0.5,1.0",
+            "trso_gate_search_batches": 16,
             "trso_head_warmup_steps": 0,
         })
     elif method == "conv":

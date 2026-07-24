@@ -1,6 +1,6 @@
 # TRSO: universal fair baseline framework
 
-> **Current release:** TRSO-v3 Universal Adaptive. The proposal now uses task-loss-scale-invariant calibration, response-derived grouping, feature-scale-controlled residuals, automatic model-relative budgets/calibration sizes, rectangular token grids, multiple prefix tokens, and conservative generic CNN/Transformer insertion fallbacks. V1 and V2 remain available as ablations. See [TRSO_V3_METHOD.md](TRSO_V3_METHOD.md), [TEST_REPORT_TRSO_V3.md](TEST_REPORT_TRSO_V3.md), and [GENERALIZATION_SCOPE.md](GENERALIZATION_SCOPE.md).
+> **Current release:** TRSO-v3 Performance-Corrected. The proposal now preserves cross-layer response magnitudes with global calibration normalization, uses genuinely sparse candidate-capacity budgeting, jointly adapts the shared classifier by default, applies one global residual budget across selected layers, and uses stable optimizer groups. V1 and V2 remain available as ablations. See [PERFORMANCE_RELEASE.md](PERFORMANCE_RELEASE.md), [TRSO_V3_METHOD.md](TRSO_V3_METHOD.md), and [GENERALIZATION_SCOPE.md](GENERALIZATION_SCOPE.md).
 
 # Scientific TRSO
 
@@ -10,11 +10,12 @@ TRSO-v3 preserves the original scientific core—aligned task-response measureme
 
 The default V3 path provides:
 
-- per-batch RMS-normalized calibration gradients for single-label, multi-label, and regression losses;
+- one shared per-batch RMS normalization factor across all candidate layers, preserving cross-layer task-response magnitude while remaining invariant to task-loss units;
 - response-derived balanced channel groups with automatic width-aware group count;
-- per-sample adapter residual RMS control, defaulting to a 5% update-to-feature ratio;
-- stable response-energy-per-parameter allocation;
-- automatic calibration size and model-relative parameter budget when set to zero;
+- per-sample residual RMS control with a 5% **global** perturbation budget divided across selected adapters;
+- activation-normalized stable response-energy-per-parameter allocation;
+- automatic sparse allocation from 35% of total candidate-adapter capacity when the explicit budget is zero;
+- rank-4 trainable response bases and joint low-LR classifier adaptation by default;
 - BCHW, BHWC, and BNC layouts, rectangular patch grids, and multiple prefix tokens;
 - preferred named architecture contracts plus conservative generic Conv2d/token-block fallbacks.
 
@@ -26,9 +27,12 @@ Paper-named baselines remain strict to their supported architecture domains. Uns
 python -m tools.run_fair_suite \
   --dataset dtd --task auto --data_path ./data --download True \
   --backbones resnet50@torchvision,vit_tiny_patch16_224@timm \
-  --methods auto --seeds 0,1,2 --epochs 30 --input_size 0 \
-  --peft_lr 5e-3 --full_lr 1e-4 --linear_lr 1e-1 \
-  --warmup_epochs 5 --trso_budget 0 --execute
+  --methods linear,trso,full,lora,bitfit,ssf,adaptformer,conv \
+  --seeds 0,1,2 --epochs 50 --input_size 0 \
+  --peft_lr 1e-3 --full_lr 1e-4 --linear_lr 1e-3 \
+  --warmup_epochs 5 --augmentation strong \
+  --peft_freeze_head False --trso_budget 0 \
+  --trso_calibration_batches 16 --trso_rank 4 --execute
 ```
 
 For direct proposal runs, use:
@@ -37,13 +41,20 @@ For direct proposal runs, use:
 --tuning_method trso
 --trso_variant v3
 --trso_parameter_budget 0
---trso_calibration_batches 0
+--trso_auto_budget_ratio 0.35
+--trso_auto_sparse True
+--trso_calibration_batches 16
+--trso_spatial_rank 4
+--trso_basis_trainable True
 --trso_channel_groups 0
 --trso_grouping_mode auto
---trso_calibration_grad_norm auto
+--trso_calibration_grad_norm global_rms
 --trso_residual_norm auto
---trso_score_mode stable_energy_per_param
+--trso_residual_budget_mode global
+--trso_score_mode normalized_stable_energy_per_param
 --trso_prefix_coupling_mode auto
+--peft_freeze_head False
+--peft_head_lr_scale 0.5
 ```
 
 Run the focused general V3 search with:

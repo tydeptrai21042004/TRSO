@@ -19,26 +19,59 @@ from models.model_support import METHOD_SUPPORT
 from tools.preflight_paper_baselines import run as baseline_preflight
 from tools.preflight_trso import run as trso_preflight
 from tools.preflight_trso_v3 import run_preflight as trso_v3_preflight
-from tools.run_fair_suite import SINGLE_LABEL_DATASETS, build_suite
+from tools.run_fair_suite import SINGLE_LABEL_DATASETS, build_suite, parser as fair_parser
 from tools.verify_fairness import verify_manifest
 from tools.experiment_grid import write_manifest
 
 
 def _args(root: Path, task: str) -> Namespace:
-    return Namespace(
-        dataset="fake", task=task, data_path=str(root / "data"), download=False,
-        dataset_args_json="{}", output_root=str(root / "outputs"),
-        manifest=str(root / f"{task}.json"), seeds="0", split_seed=2026,
-        epochs=2, batch_size=4, num_workers=0, input_size=32,
-        backbones="resnet50@torchvision,vit_tiny_patch16_224@timm",
-        methods="auto", peft_lr=5e-3, full_lr=1e-4, linear_lr=1e-1,
-        weight_decay=1e-4, warmup_epochs=1, min_lr=1e-6, optimizer="adamw",
-        trso_budget=1000, trso_calibration_batches=2,
-        ra_pretrained_checkpoint="", device="cpu", gpu_ids="0",
-        parallel_runs=1, execute=False, max_runs=0,
-        profile_efficiency=False, measure_eval_latency=False,
-        allow_val_as_test=False,
-    )
+    # Start from the real fair-runner parser so this audit cannot silently drift
+    # when the performance protocol gains a new option.
+    args = fair_parser().parse_args([])
+    args.dataset = "fake"
+    args.task = task
+    args.data_path = str(root / "data")
+    args.download = False
+    args.weights = "none"
+    args.pretrained = False
+    args.dataset_args_json = "{}"
+    args.output_root = str(root / "outputs")
+    args.manifest = str(root / f"{task}.json")
+    args.seeds = "0"
+    args.split_seed = 2026
+    args.epochs = 2
+    args.batch_size = 4
+    args.num_workers = 0
+    args.input_size = 32
+    args.backbones = "resnet50@torchvision,vit_tiny_patch16_224@timm"
+    args.methods = "auto"
+    args.peft_lr = 1e-3
+    args.full_lr = 1e-4
+    args.linear_lr = 1e-3
+    args.weight_decay = 1e-4
+    args.warmup_epochs = 1
+    args.min_lr = 1e-6
+    args.optimizer = "adamw"
+    args.augmentation = "strong"
+    args.peft_freeze_head = False
+    args.peft_head_lr_scale = 0.5
+    args.trso_budget = 0
+    args.trso_auto_budget_ratio = 0.35
+    args.trso_calibration_batches = 2
+    args.trso_rank = 4
+    args.trso_basis_trainable = True
+    args.trso_max_adapters = 0
+    args.trso_residual_target = 0.05
+    args.ra_pretrained_checkpoint = ""
+    args.device = "cpu"
+    args.gpu_ids = "0"
+    args.parallel_runs = 1
+    args.execute = False
+    args.max_runs = 0
+    args.profile_efficiency = False
+    args.measure_eval_latency = False
+    args.allow_val_as_test = False
+    return args
 
 
 def run_audit() -> dict:

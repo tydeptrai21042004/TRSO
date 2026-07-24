@@ -3,8 +3,8 @@
 ## What is generalized
 
 TRSO-v3 is dataset-name independent. It operates on the task loss and feature
-layout supplied by the active experiment, with scale-normalized calibration and
-scale-controlled residual updates. It supports the repository's three task
+layout supplied by the active experiment, with globally scale-normalized calibration, sparse capacity-relative allocation,
+and a depth-aware global residual budget. It supports the repository's three task
 families:
 
 - single-label classification;
@@ -16,7 +16,7 @@ generic fallbacks for Conv2d CNNs and pre-normalized token blocks. Token support
 includes rectangular grids and multiple prefix tokens when grid metadata is
 available.
 
-Automatic calibration size, response grouping, and model-relative budget
+Automatic calibration size, response grouping, and candidate-capacity budget
 selection prevent the default proposal from being hard-coded for DTD,
 ResNet-18, ViT-Tiny, 47 classes, or one loss scale.
 

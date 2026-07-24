@@ -84,12 +84,14 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--task", default="auto", choices=["auto", "single_label", "multilabel", "regression"])
     p.add_argument("--data_path", default="./data")
     p.add_argument("--download", type=str2bool, default=False)
+    p.add_argument("--weights", default="DEFAULT", help="Pretrained weight identifier; use 'none' for offline smoke tests.")
+    p.add_argument("--pretrained", type=str2bool, default=None)
     p.add_argument("--dataset_args_json", default="{}", help="Extra dataset CLI arguments as a JSON object.")
     p.add_argument("--output_root", default="outputs_fair")
     p.add_argument("--manifest", default="experiments/fair_manifest.json")
     p.add_argument("--seeds", default="0,1,2")
     p.add_argument("--split_seed", type=int, default=2026)
-    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--input_size", type=int, default=0, help="0 resolves native pretrained size before dataset transforms.")
@@ -99,15 +101,22 @@ def parser() -> argparse.ArgumentParser:
         help="Comma-separated backbone@source entries.",
     )
     p.add_argument("--methods", default="auto", help="Comma-separated methods or 'auto' for every registered baseline.")
-    p.add_argument("--peft_lr", type=float, default=5e-3)
+    p.add_argument("--peft_lr", type=float, default=1e-3)
     p.add_argument("--full_lr", type=float, default=1e-4)
-    p.add_argument("--linear_lr", type=float, default=1e-1)
+    p.add_argument("--linear_lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--warmup_epochs", type=int, default=5)
     p.add_argument("--min_lr", type=float, default=1e-6)
     p.add_argument("--optimizer", default="adamw", choices=["adamw", "sgd"])
-    p.add_argument("--trso_budget", type=int, default=0, help="0 uses TRSO-v3's backbone-scaled automatic budget.")
-    p.add_argument("--trso_calibration_batches", type=int, default=0, help="0 uses task/data-size-aware calibration.")
+    p.add_argument("--augmentation", default="strong", choices=["basic", "strong"])
+    p.add_argument("--peft_head_lr_scale", type=float, default=0.5)
+    p.add_argument("--trso_budget", type=int, default=0, help="0 uses TRSO-v3's candidate-capacity automatic budget.")
+    p.add_argument("--trso_auto_budget_ratio", type=float, default=0.35)
+    p.add_argument("--trso_calibration_batches", type=int, default=16, help="0 uses task/data-size-aware calibration.")
+    p.add_argument("--trso_rank", type=int, default=4)
+    p.add_argument("--trso_basis_trainable", type=str2bool, default=True)
+    p.add_argument("--trso_max_adapters", type=int, default=0, help="0 enables sparse automatic selection.")
+    p.add_argument("--trso_residual_target", type=float, default=0.05)
     p.add_argument("--ra_pretrained_checkpoint", default="")
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu_ids", default="0")
@@ -116,7 +125,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--max_runs", type=int, default=0)
     p.add_argument("--profile_efficiency", type=str2bool, default=True)
     p.add_argument("--measure_eval_latency", type=str2bool, default=True)
-    p.add_argument("--peft_freeze_head", type=str2bool, default=True, help="Use the same frozen best linear head for every compatible PEFT method.")
+    p.add_argument("--peft_freeze_head", type=str2bool, default=False, help="Initialize from the same best linear head, then jointly adapt it for every compatible PEFT method.")
     p.add_argument("--allow_val_as_test", type=str2bool, default=False)
     return p
 
@@ -175,11 +184,14 @@ def parse_methods(text: str) -> list[str]:
 
 
 def base_common(args: argparse.Namespace, task: str, dataset_args: dict[str, Any]) -> dict[str, Any]:
+    strong_single_label = getattr(args, "augmentation", "strong") == "strong" and task == "single_label"
     common = {
         "dataset": args.dataset,
         "task": task,
         "data_path": args.data_path,
         "download": args.download,
+        "weights": getattr(args, "weights", "DEFAULT"),
+        "pretrained": getattr(args, "pretrained", None),
         "input_size": args.input_size,
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
@@ -204,14 +216,17 @@ def base_common(args: argparse.Namespace, task: str, dataset_args: dict[str, Any
         "paper_hparams": False,
         "legacy_auto_hparams": False,
         "train_aug": "standard",
-        "aa": "none",
-        "color_jitter": 0.0,
-        "mixup": 0.0,
+        "aa": "rand-m9-mstd0.5-inc1" if strong_single_label else "none",
+        "color_jitter": 0.2 if strong_single_label else 0.0,
+        "mixup": 0.2 if strong_single_label else 0.0,
         "cutmix": 0.0,
-        "smoothing": 0.0,
-        "reprob": 0.0,
+        "smoothing": 0.1 if strong_single_label else 0.0,
+        "reprob": 0.1 if strong_single_label else 0.0,
         "keep_pretrained_head": False,
-        "peft_freeze_head": getattr(args, "peft_freeze_head", True),
+        "peft_freeze_head": getattr(args, "peft_freeze_head", False),
+        "peft_head_lr_scale": float(getattr(args, "peft_head_lr_scale", 0.5)),
+        "clip_grad": 1.0,
+        "no_decay_bias_norm": True,
         "split_seed": args.split_seed,
         "allow_val_as_test": args.allow_val_as_test,
     }
@@ -241,26 +256,31 @@ def method_variant(
             "trso_variant": "v3",
             "trso_basis_source": "response",
             "trso_allocation": "exact",
-            "trso_score_mode": "stable_energy_per_param",
+            "trso_score_mode": "normalized_stable_energy_per_param",
             "trso_noise_beta": 0.0,
             "trso_parameter_budget": args.trso_budget,
+            "trso_auto_budget_ratio": getattr(args, "trso_auto_budget_ratio", 0.35),
             "trso_calibration_batches": args.trso_calibration_batches,
             "trso_kernel_size": 5,
-            "trso_spatial_rank": 2,
+            "trso_spatial_rank": getattr(args, "trso_rank", 4),
+            "trso_basis_trainable": getattr(args, "trso_basis_trainable", True),
+            "trso_max_adapters": getattr(args, "trso_max_adapters", 0),
+            "trso_auto_sparse": True,
             "trso_coefficient_mode": "grouped",
             "trso_channel_groups": 0,
             "trso_grouping_mode": "response",
             "trso_input_norm": "rms",
-            "trso_calibration_grad_norm": "rms",
+            "trso_calibration_grad_norm": "global_rms",
             "trso_residual_norm": "rms",
-            "trso_residual_target": 0.05,
+            "trso_residual_target": getattr(args, "trso_residual_target", 0.05),
+            "trso_residual_budget_mode": "global",
             "trso_channel_response": True,
             "trso_prefix_coupling": True,
             "trso_prefix_coupling_mode": "all",
             "trso_v2_gate_init": 1.0,
             "trso_gate_search": True,
-            "trso_gate_search_values": "0.25,0.5,1.0,1.5",
-            "trso_gate_search_batches": 8,
+            "trso_gate_search_values": "0.0,0.05,0.1,0.25,0.5,1.0",
+            "trso_gate_search_batches": min(16, max(8, args.trso_calibration_batches)),
             "trso_head_warmup_steps": 0,
         })
     elif method == "conv":
@@ -396,6 +416,8 @@ def main() -> None:
         "same_scheduler": "cosine",
         "same_warmup_epochs": args.warmup_epochs,
         "same_weight_decay": args.weight_decay,
+        "peft_head_lr_scale": args.peft_head_lr_scale,
+        "augmentation": args.augmentation,
         "full_learning_rate": args.full_lr,
         "linear_learning_rate": args.linear_lr,
         "epochs": args.epochs,
@@ -403,7 +425,7 @@ def main() -> None:
         "input_size_note": "0 means native pretrained size resolved before dataset transforms.",
         "scheduled_method_backbone_pairs": scheduled,
         "skipped_method_backbone_pairs": skipped,
-        "shared_head_policy": "Best linear-probe head per backbone and seed is loaded before PEFT construction/TRSO calibration; it is frozen for all compatible PEFT methods when --peft_freeze_head=True. Visual Prompting retains the source head by definition.",
+        "shared_head_policy": "Best linear-probe head per backbone and seed is loaded before PEFT construction/TRSO calibration. By default it is jointly adapted with every compatible PEFT method using a reduced head learning rate; --peft_freeze_head=True preserves the old isolated-adapter protocol. Visual Prompting retains the source head by definition.",
         "unsupported_policy": "Explicit skip report; no silent architectural approximation.",
     }
     protocol_path = Path(args.manifest).with_name(Path(args.manifest).stem + "_protocol.json")

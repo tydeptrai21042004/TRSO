@@ -40,14 +40,14 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_source", default="auto", choices=["auto", "torchvision", "timm", "hub"])
     parser.add_argument("--input_size", type=int, default=0, help="0 resolves native pretrained size.")
     parser.add_argument("--nb_classes", type=int, default=10)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seeds", default="0,1,2")
     parser.add_argument("--split_seed", type=int, default=2026)
-    parser.add_argument("--parameter_budget", type=int, default=0, help="0 uses the automatic V3 backbone-scaled budget.")
-    parser.add_argument("--peft_lr", type=float, default=5e-3)
-    parser.add_argument("--linear_lr", type=float, default=1e-1)
+    parser.add_argument("--parameter_budget", type=int, default=0, help="0 uses the automatic V3 candidate-capacity budget.")
+    parser.add_argument("--peft_lr", type=float, default=1e-3)
+    parser.add_argument("--linear_lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--output_root", default="outputs_ablation")
@@ -66,23 +66,29 @@ def ablation_variants(budget: int):
         "trso_variant": "v3",
         "trso_basis_source": "response",
         "trso_allocation": "exact",
-        "trso_score_mode": "stable_energy_per_param",
+        "trso_score_mode": "normalized_stable_energy_per_param",
         "trso_noise_beta": 0.0,
         "trso_coefficient_mode": "grouped",
         "trso_channel_groups": 0,
         "trso_grouping_mode": "response",
         "trso_input_norm": "rms",
-        "trso_calibration_grad_norm": "rms",
+        "trso_calibration_grad_norm": "global_rms",
         "trso_residual_norm": "rms",
         "trso_residual_target": 0.05,
+        "trso_residual_budget_mode": "global",
         "trso_channel_response": True,
         "trso_prefix_coupling": True,
         "trso_prefix_coupling_mode": "all",
         "trso_v2_gate_init": 1.0,
         "trso_parameter_budget": budget,
-        "trso_calibration_batches": 0,
+        "trso_auto_budget_ratio": 0.35,
+        "trso_auto_sparse": True,
+        "trso_calibration_batches": 16,
         "trso_kernel_size": 5,
-        "trso_spatial_rank": 2,
+        "trso_spatial_rank": 4,
+        "trso_basis_trainable": True,
+        "trso_gate_search_values": "0.0,0.05,0.1,0.25,0.5,1.0",
+        "trso_gate_search_batches": 16,
         "trso_head_warmup_steps": 0,
     }
     rows = [("proposed", proposed)]
@@ -93,17 +99,21 @@ def ablation_variants(budget: int):
             "trso_prefix_coupling": False, "trso_gate_init": 1e-2,
             "trso_calibration_grad_norm": "none", "trso_residual_norm": "none",
             "trso_grouping_mode": "contiguous", "trso_score_mode": "energy",
-            "trso_parameter_budget": 12000,
+            "trso_parameter_budget": 12000, "trso_spatial_rank": 2,
+            "trso_basis_trainable": False, "trso_residual_budget_mode": "per_layer",
         },
         "v2_previous": {
             "trso_variant": "v2", "trso_channel_groups": 8,
             "trso_grouping_mode": "contiguous", "trso_calibration_grad_norm": "none",
             "trso_residual_norm": "none", "trso_score_mode": "snr_per_param",
+            "trso_spatial_rank": 2, "trso_basis_trainable": False,
+            "trso_residual_budget_mode": "per_layer",
         },
         "v3_no_channel_response": {"trso_channel_response": False},
         "v3_no_input_norm": {"trso_input_norm": "none"},
-        "v3_no_gradient_norm": {"trso_calibration_grad_norm": "none"},
+        "v3_per_layer_gradient_rms": {"trso_calibration_grad_norm": "rms"},
         "v3_no_residual_norm": {"trso_residual_norm": "none"},
+        "v3_per_layer_residual_budget": {"trso_residual_budget_mode": "per_layer"},
         "v3_contiguous_groups": {"trso_grouping_mode": "contiguous"},
         "v3_full_coefficients": {"trso_coefficient_mode": "full", "trso_parameter_budget": 12000},
         "v3_locked_coefficients": {"trso_coefficient_mode": "locked"},
@@ -124,16 +134,24 @@ def ablation_variants(budget: int):
         "noise_beta_0": {"trso_noise_beta": 0.0},
         "noise_beta_05": {"trso_noise_beta": 0.5},
         "rank_1": {"trso_spatial_rank": 1},
-        "rank_4": {"trso_spatial_rank": 4},
+        "rank_2": {"trso_spatial_rank": 2},
+        "rank_6": {"trso_spatial_rank": 6},
+        "basis_frozen": {"trso_basis_trainable": False},
         "kernel_3": {"trso_kernel_size": 3},
         "kernel_7": {"trso_kernel_size": 7},
         "calibration_1": {"trso_calibration_batches": 1},
         "calibration_4": {"trso_calibration_batches": 4},
         "calibration_32": {"trso_calibration_batches": 32},
-        "budget_quarter": {"trso_parameter_budget": max(1, budget // 4)},
-        "budget_half": {"trso_parameter_budget": max(1, budget // 2)},
-        "budget_double": {"trso_parameter_budget": 2 * budget},
-        "all_candidates": {"trso_parameter_budget": 0},
+        "capacity_20pct": {"trso_parameter_budget": 0, "trso_auto_budget_ratio": 0.20},
+        "capacity_50pct": {"trso_parameter_budget": 0, "trso_auto_budget_ratio": 0.50},
+        "budget_half": (
+            {"trso_parameter_budget": max(1, budget // 2)}
+            if budget > 0 else
+            {"trso_parameter_budget": 0, "trso_auto_budget_ratio": 0.175}
+        ),
+        "max_4_adapters": {"trso_max_adapters": 4},
+        "max_8_adapters": {"trso_max_adapters": 8},
+        "frozen_shared_head": {"peft_freeze_head": True},
     }
     for name, update in controlled.items():
         variant = dict(proposed)
@@ -181,14 +199,17 @@ def common_args(args):
         "legacy_auto_hparams": False,
         "split_seed": args.split_seed,
         "train_aug": "standard",
-        "aa": "none",
-        "color_jitter": 0.0,
-        "mixup": 0.0,
+        "aa": "rand-m9-mstd0.5-inc1" if args.task in {"auto", "single_label"} else "none",
+        "color_jitter": 0.2 if args.task in {"auto", "single_label"} else 0.0,
+        "mixup": 0.2 if args.task in {"auto", "single_label"} else 0.0,
         "cutmix": 0.0,
-        "smoothing": 0.0,
-        "reprob": 0.0,
+        "smoothing": 0.1 if args.task in {"auto", "single_label"} else 0.0,
+        "reprob": 0.1 if args.task in {"auto", "single_label"} else 0.0,
         "keep_pretrained_head": False,
-        "peft_freeze_head": True,
+        "peft_freeze_head": False,
+        "peft_head_lr_scale": 0.5,
+        "clip_grad": 1.0,
+        "no_decay_bias_norm": True,
     }
     common.update(extra)
     return common

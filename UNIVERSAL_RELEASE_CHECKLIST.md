@@ -15,7 +15,8 @@ silently rewritten to run on an incompatible backbone.
 - One controlled AdamW/cosine recipe for every PEFT method and TRSO.
 - Full fine-tuning and linear probing may use separate learning rates.
 - A best task-aware linear head is reused before PEFT construction and TRSO
-  calibration when the method definition permits it.
+  calibration, then jointly adapted with a lower learning-rate multiplier when
+  the method definition permits it.
 - Native pretrained input size can be resolved with `--input_size 0`.
 - Single-label, multi-label, and regression losses, selection rules, and final
   metrics are supported.
@@ -31,10 +32,10 @@ silently rewritten to run on an incompatible backbone.
   methods, seeds, and one or multiple GPUs.
 - Automatic fairness verification detects protocol mismatches before results are
   interpreted.
-- TRSO-v3 removes task-loss-unit dependence through per-batch response normalization.
+- TRSO-v3 removes task-loss-unit dependence through one shared per-batch global-RMS normalization while preserving relative cross-layer response strength.
 - Response-derived channel grouping replaces fixed channel-index assumptions.
-- Residual RMS control makes initial adapter strength comparable across feature scales.
-- Automatic calibration and model-relative budget resolution replace DTD/backbone-specific defaults.
+- A global residual RMS budget makes initial adapter strength comparable across feature scales and model depths.
+- Automatic calibration and sparse candidate-capacity budget resolution replace DTD/backbone-specific defaults and prevent all-layer selection.
 - Rectangular token grids and multiple prefix tokens are supported.
 - Conservative generic CNN and Transformer insertion fallbacks are tested and recorded.
 
@@ -45,7 +46,7 @@ silently rewritten to run on an incompatible backbone.
 - Representative named and generic CNN/Transformer layouts pass structural TRSO preflights.
 - Rectangular grids, multiple prefix tokens, task-loss scaling and feature scaling pass numerical invariance tests.
 - Complete single-label, multi-label and regression smoke runs pass checkpoint restoration and final metrics.
-- The complete 118-test automated suite passes.
+- The complete 123-test automated suite passes, including five performance-release regression tests.
 - Dry-run manifests and fairness checks pass for all three task types.
 
 ## Scientific boundary

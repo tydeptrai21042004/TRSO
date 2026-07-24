@@ -110,13 +110,19 @@ For `csv`, `--task` must be explicit.
 
 ## Universal TRSO-v3 defaults
 
-V3 uses automatic calibration size, automatic model-relative budget, response-derived grouping, loss-scale-normalized calibration, residual RMS control, stable-energy-per-parameter scoring, and multi-prefix coupling. Zero values request automatic resolution:
+V3 uses global loss-scale normalization that preserves cross-layer magnitudes, automatic candidate-capacity budgeting, sparse layer selection, response-derived grouping, a global residual RMS budget, activation-normalized stable-energy scoring, and multi-prefix coupling:
 
 ```text
 --trso_variant v3
 --trso_parameter_budget 0
---trso_calibration_batches 0
+--trso_auto_budget_ratio 0.35
+--trso_calibration_batches 16
+--trso_spatial_rank 4
+--trso_basis_trainable True
 --trso_channel_groups 0
+--trso_calibration_grad_norm global_rms
+--trso_residual_budget_mode global
+--trso_score_mode normalized_stable_energy_per_param
 ```
 
 The resolved values and insertion points are stored in each run artifact. Named backbone contracts take precedence; conservative generic Conv2d/pre-norm token-block fallbacks are recorded explicitly.

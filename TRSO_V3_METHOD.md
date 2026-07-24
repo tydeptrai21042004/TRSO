@@ -29,33 +29,42 @@ in \(p_\ell\). A mini-batch produces task loss \(L_b\) and raw probe gradient
 \]
 
 Loss units differ substantially between cross-entropy, binary
-cross-entropy, MAE, MSE, and multi-output regression. V3 therefore normalizes
-each batch response before accumulation. With the default RMS rule,
+cross-entropy, MAE, MSE, and multi-output regression. Independently normalizing
+each layer would remove useful response-magnitude differences before layer
+selection. V3 therefore concatenates all candidate probe gradients conceptually
+into one batch response vector
+
+\[
+ q_b=\operatorname{concat}_{\ell}(g_{\ell,b})
+\]
+
+and applies one shared RMS multiplier:
 
 \[
  \widehat g_{\ell,b}
  =
- \frac{g_{\ell,b}}
- {\sqrt{\operatorname{mean}(g_{\ell,b}^{2})}+\varepsilon}.
+ g_{\ell,b}
+ \frac{\sqrt{|q_b|}}
+ {\lVert q_b\rVert_2+\varepsilon}.
 \]
 
-The calibrated response is
+The calibrated response remains
 
 \[
  \overline g_\ell=\frac{1}{M}\sum_{b=1}^{M}\widehat g_{\ell,b}.
 \]
 
-Consequently, multiplying a task loss by any positive constant does not change
-the recovered response direction apart from numerical precision. The release
-preflight verifies this property directly.
+Multiplying the complete task loss by a positive constant therefore leaves the
+calibration unchanged, while a layer with twice the raw response magnitude
+still retains twice the normalized magnitude.
 
 Supported calibration normalization modes are:
 
 ```text
-none | unit | rms | auto
+none | unit | rms | global_rms | auto
 ```
 
-For V3, `auto` resolves to `rms`.
+For V3, `auto` resolves to `global_rms`.
 
 ## 2. Spatial and channel response components
 
@@ -127,16 +136,21 @@ V3 normalizes the combined adapter residual per sample:
  {\operatorname{RMS}(\Delta_\ell)+\varepsilon},
 \]
 
-where \(\tau\) is the target update-to-feature RMS ratio. The default is
+where \(\tau_\ell\) is the per-adapter target. The default command
 
 ```text
 --trso_residual_target 0.05
+--trso_residual_budget_mode global
 ```
 
-The scaling factor is bounded by `--trso_residual_scale_limit`. This preserves
-the calibrated direction while making initial update magnitude comparable
-across feature scales. The preflight verifies the same approximately 0.05 ratio
-when input scale changes by four orders of magnitude.
+interprets 0.05 as a network-level target. With \(L\) selected adapters,
+
+\[
+ \tau_\ell=\frac{0.05}{\sqrt{L}}.
+\]
+
+This avoids injecting a full 5% residual independently at every block. The
+scaling factor remains bounded by `--trso_residual_scale_limit`.
 
 ## 5. General token layouts and prefix coupling
 
@@ -162,53 +176,57 @@ assumed.
 
 ## 6. Automatic calibration size and parameter budget
 
-When the user specifies zero, V3 resolves calibration and budget from the actual
+The performance release uses 16 calibration batches by default. When the user
+explicitly specifies zero, V3 resolves calibration and budget from the actual
 experiment:
 
 ```text
---trso_calibration_batches 0
---trso_parameter_budget 0
+--trso_calibration_batches 16   # recommended default
+--trso_parameter_budget 0       # capacity-relative automatic budget
 ```
 
 Calibration batches depend on data-loader length and task type. Multi-label and
 regression receive more calibration evidence because their gradient estimates
 are often noisier.
 
-The automatic adapter budget is
+Let \(C_{\mathrm{all}}\) be the trainable cost of activating every candidate
+at full rank. The automatic adapter budget is
 
 \[
  B=\operatorname{clip}
  \left(
- \rho P_{\mathrm{model}},
+ \rho C_{\mathrm{all}},
  B_{\min},
  B_{\max}
- \right),
+ \right).
 \]
 
-then clipped to the actual candidate-layer capacity. Defaults are:
+Defaults are:
 
 ```text
-rho  = 5e-5
-min  = 128
-max  = 1024
+rho  = 0.35
+min  = 1 (and at least the cheapest rank-one candidate)
+max  = 4096
 ```
 
-This keeps the method low-parameter across small and large backbones instead of
-using a dataset-specific fixed budget.
+V3 also resolves a sparse maximum adapter count when `--trso_max_adapters 0`.
+This prevents the automatic budget from degenerating into all-layer selection.
 
 ## 7. Stable utility per parameter
 
-V3 records response energy and stability across calibration batches. Its default
-allocation score is stable response energy per trainable parameter:
+V3 records response energy, stability, and feature activation energy across
+calibration batches. Its default allocation score is activation-normalized
+stable response energy per trainable parameter:
 
 \[
  U_\ell(r)
  =
- \frac{E_\ell(r)\,S_\ell(r)}{C_\ell(r)},
+ \frac{E_\ell(r)\,S_\ell(r)}
+ {A_\ell C_\ell(r)},
 \]
 
-where \(E_\ell(r)\) is captured singular energy, \(S_\ell(r)\) is empirical
-response stability, and \(C_\ell(r)\) is trainable cost. Exact sparse dynamic
+where \(A_\ell\) is mean feature energy. This reduces the bias toward layers
+whose activations merely use larger numerical units. Exact sparse dynamic
 programming allocates layer ranks under the resolved global budget.
 
 Available V3-oriented score modes include:
@@ -216,6 +234,7 @@ Available V3-oriented score modes include:
 ```text
 stable_energy
 stable_energy_per_param
+normalized_stable_energy_per_param
 stability
 stability_per_param
 ```
@@ -244,8 +263,9 @@ coupling enabled, the typical V3 layer cost is approximately
  Gr+G+1+I_{\mathrm{prefix}}.
 \]
 
-With \(G=8\) and \(r=2\), this is about 25 parameters for a CNN layer and 26 for
-a token layer. The exact count is recorded per run.
+With trainable spatial atoms, the exact cost also includes \(rk^2\). The
+performance-corrected default uses rank 4 and activates only a sparse subset of
+layers. The exact count is recorded per run.
 
 ## 10. Recommended universal command
 
@@ -254,10 +274,13 @@ python main.py \
   --dataset dtd --task auto --data_path ./data --download True \
   --backbone resnet50 --model_source torchvision --pretrained True \
   --tuning_method trso --trso_variant v3 \
-  --trso_parameter_budget 0 --trso_calibration_batches 0 \
-  --trso_channel_groups 0 --trso_grouping_mode auto \
-  --trso_calibration_grad_norm auto --trso_residual_norm auto \
-  --trso_score_mode stable_energy_per_param \
+  --trso_parameter_budget 0 --trso_auto_budget_ratio 0.35 \
+  --trso_calibration_batches 16 --trso_spatial_rank 4 \
+  --trso_basis_trainable True --trso_channel_groups 0 \
+  --trso_grouping_mode auto --trso_calibration_grad_norm global_rms \
+  --trso_residual_norm auto --trso_residual_budget_mode global \
+  --trso_score_mode normalized_stable_energy_per_param \
+  --peft_freeze_head False --peft_head_lr_scale 0.5 \
   --trso_prefix_coupling_mode auto --input_size 0
 ```
 

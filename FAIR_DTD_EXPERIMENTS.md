@@ -14,19 +14,18 @@ Every PEFT method and TRSO uses the same settings:
 | Dataset | Complete DTD, official partition 1 |
 | Image size | 224 x 224 |
 | Seeds | 0, 1, 2 |
-| Epochs | 20 |
+| Epochs | 50 |
 | Optimizer | AdamW |
-| Learning rate | 5e-3 |
+| Adapter learning rate | 1e-3 |
 | Scheduler | Cosine decay |
 | Warm-up | 5 epochs |
 | Minimum learning rate | 1e-6 |
 | Weight decay | 1e-4 |
-| Training augmentation | RandomResizedCrop + horizontal flip |
+| Training augmentation | RandAugment + Mixup + color jitter + random erasing |
 | Validation selection | Best validation top-1 |
 | Test protocol | Official DTD test split, evaluated once after selection |
 
-Full fine-tuning uses `1e-4`, and linear probing uses `1e-1`, as the only
-permitted learning-rate exceptions. The optimizer family, scheduler, warm-up,
+Full fine-tuning uses `1e-4`, while linear probing uses AdamW at `1e-3`. The optimizer family, scheduler, warm-up,
 input resolution, augmentation, split, checkpoint selection and seed list are
 otherwise controlled.
 
@@ -34,9 +33,10 @@ otherwise controlled.
 
 A linear head is trained once per backbone and seed. Its best checkpoint is
 loaded by every compatible PEFT method before adapter construction or TRSO
-calibration. This avoids calibrating TRSO from a random classifier and prevents
-head optimization from dominating comparisons among small adapters. The shared
-head preparation cost is preserved as a separate suite and must be reported.
+calibration. The head is then jointly adapted at half the adapter learning rate.
+This avoids calibrating TRSO from a random classifier without turning a weak or
+misaligned frozen head into a permanent bottleneck. The shared-head preparation
+cost is preserved as a separate suite and must be reported.
 
 Visual Prompting is the architectural exception because it retains the original
 pretrained source classifier. Its source-to-target map is estimated only from
@@ -79,11 +79,17 @@ checkpoint. It is not mixed into the ResNet-50 table. Supply
 - ViT adapters are inserted before each Transformer block, so even the final
   adapter can influence the class token through self-attention.
 - DTD uses the pretrained native 224 resolution instead of 96.
-- Calibration uses 16 batches and a noise-adjusted score.
-- The common PEFT learning rate is 5e-3 instead of 3e-4.
-- Training uses 20 epochs and five warm-up epochs instead of six short epochs.
-- Parameter budgets are large enough to test the method but should still be
-  accompanied by budget-matched ablations.
+- Calibration uses 16 batches, one global gradient-RMS reference, and an
+  activation-normalized stable-energy-per-parameter score.
+- The automatic budget is 35% of total candidate capacity and is paired with a
+  sparse adapter-count cap, so it cannot silently activate every block.
+- Rank four and trainable response bases provide useful capacity while preserving
+  the rank-constrained operator interpretation.
+- A global residual budget is divided by the square root of the selected layer
+  count, preventing depth-dependent perturbation growth.
+- Adapter and linear-head learning rates use the stable AdamW default `1e-3`;
+  the jointly adapted PEFT head uses a `0.5` learning-rate multiplier.
+- Training uses 50 epochs and five warm-up epochs instead of a short smoke run.
 
 These corrections remove known protocol disadvantages. They do not guarantee a
 particular accuracy; final results still depend on the method, backbone,

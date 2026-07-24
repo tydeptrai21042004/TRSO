@@ -124,36 +124,38 @@ def get_args_parser():
 
     # Task-Response Spatial Operator (TRSO)
     parser.add_argument("--trso_kernel_size", type=int, default=5, help="Odd support of each depthwise spatial atom.")
-    parser.add_argument("--trso_spatial_rank", type=int, default=2, help="Maximum rank of the flattened C x k^2 channel-kernel bank.")
+    parser.add_argument("--trso_spatial_rank", type=int, default=4, help="Maximum rank of the flattened C x k^2 channel-kernel bank.")
     parser.add_argument("--trso_channel_ratio", type=int, default=16, help="Legacy compatibility argument; Scientific TRSO has no channel bottleneck.")
     parser.add_argument("--trso_operator_radius", type=float, default=1.0)
     parser.add_argument("--trso_gate_init", type=float, default=1e-2)
     parser.add_argument("--trso_basis_init_scale", type=float, default=5e-2)
-    parser.add_argument("--trso_basis_trainable", type=str2bool, default=False)
+    parser.add_argument("--trso_basis_trainable", type=str2bool, default=True)
     parser.add_argument("--trso_calibration", type=str2bool, default=True)
-    parser.add_argument("--trso_calibration_batches", type=int, default=0, help="0 chooses a task/data-size-aware value in [4, 32].")
+    parser.add_argument("--trso_calibration_batches", type=int, default=16, help="Number of train batches used for calibration; 0 chooses a task/data-size-aware value in [4, 32].")
     parser.add_argument("--trso_calibration_scale", type=float, default=1.0)
     parser.add_argument("--trso_head_warmup_steps", type=int, default=-1, help="-1 automatically warms a newly initialized task head; 0 disables warm-up.")
     parser.add_argument("--trso_keep_ratio", type=float, default=1.0)
     parser.add_argument("--trso_max_adapters", type=int, default=0, help="0 keeps all candidates allowed by keep_ratio.")
-    parser.add_argument("--trso_parameter_budget", type=int, default=0, help="Exact global budget; for v3, zero activates an automatic backbone-scaled budget.")
-    parser.add_argument("--trso_auto_budget_ratio", type=float, default=5e-5)
-    parser.add_argument("--trso_auto_budget_min", type=int, default=128)
-    parser.add_argument("--trso_auto_budget_max", type=int, default=1024)
+    parser.add_argument("--trso_parameter_budget", type=int, default=0, help="Exact global budget; for v3, zero activates an automatic candidate-capacity budget.")
+    parser.add_argument("--trso_auto_budget_ratio", type=float, default=0.35, help="Fraction of complete TRSO candidate capacity used when the explicit budget is zero.")
+    parser.add_argument("--trso_auto_budget_min", type=int, default=1)
+    parser.add_argument("--trso_auto_budget_max", type=int, default=4096)
+    parser.add_argument("--trso_auto_sparse", type=str2bool, default=True, help="Automatically limit the number of active V3 adapters when --trso_max_adapters=0.")
     parser.add_argument("--trso_config", type=str, default="", help="Load a previously calibrated TRSO JSON config.")
     parser.add_argument("--trso_save_config", type=str, default="", help="Optional explicit output path for the calibrated TRSO JSON config.")
     parser.add_argument("--trso_basis_source", type=str, default="response", choices=["response", "random", "dct"], help="Controlled basis ablation; response is the proposed SVD basis.")
     parser.add_argument("--trso_allocation", type=str, default="exact", choices=["exact", "greedy", "uniform"], help="Rank-allocation ablation under the same budget.")
-    parser.add_argument("--trso_score_mode", type=str, default="stable_energy_per_param", choices=["energy", "energy_per_param", "energy_per_channel", "noise_adjusted", "snr", "snr_per_param", "normalized_energy_per_param", "stable_energy", "stable_energy_per_param", "stability", "stability_per_param"])
+    parser.add_argument("--trso_score_mode", type=str, default="normalized_stable_energy_per_param", choices=["energy", "energy_per_param", "energy_per_channel", "noise_adjusted", "snr", "snr_per_param", "normalized_energy_per_param", "stable_energy", "stable_energy_per_param", "normalized_stable_energy_per_param", "stability", "stability_per_param"])
     parser.add_argument("--trso_noise_beta", type=float, default=0.0)
     parser.add_argument("--trso_variant", type=str, default="v3", choices=["v1", "v2", "v3"], help="v3 is the universal scale-invariant adaptive proposal; v1/v2 are preserved ablations.")
     parser.add_argument("--trso_coefficient_mode", type=str, default="auto", choices=["auto", "full", "locked", "grouped"])
     parser.add_argument("--trso_channel_groups", type=int, default=0, help="0 automatically resolves groups from layer width.")
     parser.add_argument("--trso_grouping_mode", type=str, default="auto", choices=["auto", "contiguous", "response"])
     parser.add_argument("--trso_input_norm", type=str, default="auto", choices=["auto", "none", "rms"])
-    parser.add_argument("--trso_calibration_grad_norm", type=str, default="auto", choices=["auto", "none", "unit", "rms"])
+    parser.add_argument("--trso_calibration_grad_norm", type=str, default="auto", choices=["auto", "none", "unit", "rms", "global_rms"])
     parser.add_argument("--trso_residual_norm", type=str, default="auto", choices=["auto", "none", "rms"])
-    parser.add_argument("--trso_residual_target", type=float, default=0.05)
+    parser.add_argument("--trso_residual_target", type=float, default=0.05, help="Global V3 residual RMS budget; divided by sqrt(number of selected adapters).")
+    parser.add_argument("--trso_residual_budget_mode", type=str, default="global", choices=["global", "per_layer"])
     parser.add_argument("--trso_residual_scale_limit", type=float, default=1024.0)
     parser.add_argument("--trso_channel_response", type=str2bool, default=True)
     parser.add_argument("--trso_channel_init_scale", type=float, default=1e-2)
@@ -163,8 +165,8 @@ def get_args_parser():
     parser.add_argument("--trso_v2_gate_init", type=float, default=1.0)
     parser.add_argument("--trso_gate_limit", type=float, default=2.0)
     parser.add_argument("--trso_gate_search", type=str2bool, default=True, help="Choose a global V2 trust-region gate from training calibration batches.")
-    parser.add_argument("--trso_gate_search_values", type=str, default="0.25,0.5,1.0,1.5")
-    parser.add_argument("--trso_gate_search_batches", type=int, default=4)
+    parser.add_argument("--trso_gate_search_values", type=str, default="0.0,0.05,0.1,0.25,0.5,1.0")
+    parser.add_argument("--trso_gate_search_batches", type=int, default=8)
     parser.add_argument("--trso_generic_fallback", type=str2bool, default=True, help="Use conservative generic Conv2d/Transformer-block insertion when no named architecture contract matches.")
     parser.add_argument("--trso_generic_max_candidates", type=int, default=32)
 
@@ -247,9 +249,9 @@ def get_args_parser():
     # separate learning rates as explicitly allowed by the experiment design.
     parser.add_argument("--fair_protocol", type=str2bool, default=False)
     parser.add_argument("--fair_optimizer", type=str, default="adamw", choices=["adamw", "sgd"])
-    parser.add_argument("--fair_peft_lr", type=float, default=5e-3)
+    parser.add_argument("--fair_peft_lr", type=float, default=1e-3)
     parser.add_argument("--fair_full_lr", type=float, default=1e-4)
-    parser.add_argument("--fair_linear_lr", type=float, default=1e-1)
+    parser.add_argument("--fair_linear_lr", type=float, default=1e-3)
     parser.add_argument("--fair_weight_decay", type=float, default=1e-4)
     parser.add_argument("--fair_warmup_epochs", type=int, default=5)
     parser.add_argument("--fair_min_lr", type=float, default=1e-6)
@@ -280,7 +282,9 @@ def get_args_parser():
     parser.add_argument("--finetune", default="")
     parser.add_argument("--head_from", default="", type=str)
     parser.add_argument("--head_init_scale", default=1.0, type=float)
-    parser.add_argument("--peft_freeze_head", type=str2bool, default=False, help="Freeze the shared task-aware head during PEFT adaptation; applied consistently to every compatible PEFT method.")
+    parser.add_argument("--peft_freeze_head", type=str2bool, default=False, help="Freeze the shared task-aware head during PEFT adaptation; jointly adapting it is the recommended default.")
+    parser.add_argument("--peft_head_lr_scale", type=float, default=0.5, help="Head learning-rate multiplier for PEFT methods; linear/full tuning use 1.0.")
+    parser.add_argument("--no_decay_bias_norm", type=str2bool, default=True, help="Exclude biases, normalization parameters, and scalar gates from weight decay.")
     parser.add_argument("--model_key", default="model|module", type=str)
     parser.add_argument("--model_prefix", default="", type=str)
 
@@ -421,6 +425,8 @@ def canonicalize_args(args):
         raise ValueError("TRSO residual target and scale limit must be positive.")
     if args.trso_gate_search_batches <= 0:
         raise ValueError("--trso_gate_search_batches must be positive.")
+    if args.peft_head_lr_scale <= 0:
+        raise ValueError("--peft_head_lr_scale must be positive.")
     if args.trso_generic_max_candidates <= 0:
         raise ValueError("--trso_generic_max_candidates must be positive.")
     if args.adaptformer_dim <= 0:
@@ -1280,6 +1286,79 @@ def format_primary(stats: Dict, task_type: str) -> str:
     return f"{label}={value:.5f}"
 
 
+def build_optimizer_parameter_groups(
+    model: nn.Module,
+    args,
+    adapter_param_ids: Optional[set[int]] = None,
+) -> list[dict]:
+    """Create stable adapter/head/backbone groups with LR scaling and no-decay.
+
+    Small PEFT tensors, classifier biases, normalization affine parameters and
+    scalar gates are harmed by indiscriminate decay.  The head receives a lower
+    LR after linear-probe initialization while all PEFT methods keep the same
+    group policy for a controlled comparison.
+    """
+    adapter_param_ids = adapter_param_ids or set()
+    buckets: dict[tuple[str, bool], list[torch.nn.Parameter]] = {}
+    method = str(getattr(args, "tuning_method", ""))
+    head_scale = (
+        float(getattr(args, "peft_head_lr_scale", 1.0))
+        if method not in {"full", "linear"}
+        else 1.0
+    )
+
+    adapter_tokens = (
+        "pet_adapter", "trso", "basis_atoms", "coefficients", "gate",
+        "bam", "ssf", "lora", "adaptformer", "piggyback", "mask_scores",
+        "adapter", "side", "tuning_module", "prompt",
+    )
+
+    def no_decay(name: str, parameter: torch.nn.Parameter) -> bool:
+        if not bool(getattr(args, "no_decay_bias_norm", True)):
+            return False
+        lower = name.lower()
+        return (
+            parameter.ndim <= 1
+            or lower.endswith(".bias")
+            or "norm" in lower
+            or ".bn" in lower
+            or "gate" in lower
+            or "scale" in lower
+            or "shift" in lower
+        )
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if _is_head_param(name):
+            kind = "head"
+        elif any(token in name for token in adapter_tokens) or id(parameter) in adapter_param_ids:
+            kind = "adapter"
+        else:
+            kind = "backbone"
+        buckets.setdefault((kind, no_decay(name, parameter)), []).append(parameter)
+
+    groups: list[dict] = []
+    for (kind, exclude_decay), parameters in sorted(buckets.items()):
+        if kind == "adapter":
+            weight_decay = 0.0 if exclude_decay else float(args.weight_decay_adapter)
+            lr_scale = 1.0
+        elif kind == "head":
+            weight_decay = 0.0 if exclude_decay else float(args.weight_decay)
+            lr_scale = head_scale
+        else:
+            weight_decay = 0.0 if exclude_decay else float(args.weight_decay)
+            lr_scale = 1.0
+        groups.append({
+            "params": parameters,
+            "lr": float(args.lr) * lr_scale,
+            "lr_scale": lr_scale,
+            "weight_decay": weight_decay,
+            "group_name": f"{kind}_{'no_decay' if exclude_decay else 'decay'}",
+        })
+    return groups
+
+
 def _classification_logits(output):
     if isinstance(output, torch.Tensor):
         return output
@@ -1297,6 +1376,86 @@ def _move_training_batch(batch, device):
         raise TypeError("TRSO calibration expects data-loader batches shaped as (images, labels, ...).")
     images, labels = batch[0], batch[1]
     return images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+
+def _global_probe_gradient_reference(adapters) -> tuple[Optional[torch.Tensor], int]:
+    """Return a shared squared norm/count for scale-invariant calibration.
+
+    The same multiplier is applied to every adapter, so arbitrary task-loss
+    units are removed without erasing the relative response magnitude across
+    candidate layers.
+    """
+    squared_norm = None
+    element_count = 0
+    for _, adapter in adapters:
+        for parameter in (adapter.probe_kernel, adapter.channel_probe):
+            grad = parameter.grad
+            if grad is None:
+                continue
+            value = grad.detach().square().sum()
+            squared_norm = value if squared_norm is None else squared_norm + value
+            element_count += grad.numel()
+    return squared_norm, element_count
+
+
+def resolve_trso_budget_and_sparsity(model: nn.Module, adapters, args) -> tuple[int, int]:
+    """Resolve an actually sparse V3 budget from adapter capacity.
+
+    The former backbone-parameter heuristic often exceeded the entire tiny
+    adapter capacity and therefore selected every layer.  Capacity-relative
+    budgeting behaves consistently across backbones and remains interpretable.
+    """
+    explicit_budget = int(args.trso_parameter_budget)
+    candidate_count = len(adapters)
+    if candidate_count <= 0:
+        return explicit_budget, 0
+
+    resolved_max = int(args.trso_max_adapters)
+    if (
+        resolved_max <= 0
+        and getattr(args, "trso_variant", "v1") == "v3"
+        and bool(getattr(args, "trso_auto_sparse", True))
+    ):
+        resolved_max = min(
+            candidate_count,
+            max(2, int(math.ceil(1.5 * math.sqrt(float(candidate_count))))),
+        )
+
+    if explicit_budget > 0 or getattr(args, "trso_variant", "v1") != "v3":
+        return explicit_budget, resolved_max
+
+    total_capacity = sum(
+        adapter.parameter_cost_for_rank(adapter.spatial_rank)
+        for _, adapter in adapters
+    )
+    cheapest = min(adapter.parameter_cost_for_rank(1) for _, adapter in adapters)
+    ratio = float(args.trso_auto_budget_ratio)
+    resolved_budget = int(round(total_capacity * ratio))
+    resolved_budget = max(int(args.trso_auto_budget_min), resolved_budget, cheapest)
+    resolved_budget = min(int(args.trso_auto_budget_max), resolved_budget, total_capacity)
+    print(
+        f"[TRSO-v3] automatic capacity budget={resolved_budget}/{total_capacity} "
+        f"({ratio:.1%}); max_adapters={resolved_max or 'unlimited'}"
+    )
+    return resolved_budget, resolved_max
+
+
+def apply_trso_residual_budget(adapters, selected: list[str], args) -> float:
+    """Convert a global perturbation target to a per-adapter RMS target."""
+    target = float(getattr(args, "trso_residual_target", 0.05))
+    if not selected:
+        return target
+    mode = str(getattr(args, "trso_residual_budget_mode", "per_layer")).lower()
+    per_adapter = target / math.sqrt(len(selected)) if mode == "global" else target
+    selected_set = set(selected)
+    for name, adapter in adapters:
+        if name in selected_set:
+            adapter.residual_target = per_adapter
+    print(
+        f"[TRSO] residual budget mode={mode}; global_target={target:g}; "
+        f"per_adapter_target={per_adapter:g}; selected={len(selected)}"
+    )
+    return per_adapter
 
 
 def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, args) -> list[str]:
@@ -1378,8 +1537,12 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
         logits = _classification_logits(model(images))
         loss = criterion(logits, labels)
         loss.backward()
+        global_squared_norm, global_element_count = _global_probe_gradient_reference(adapters)
         for _, adapter in adapters:
-            adapter.accumulate_probe_gradient()
+            adapter.accumulate_probe_gradient(
+                global_squared_norm=global_squared_norm,
+                global_element_count=global_element_count,
+            )
         used_batches += 1
 
     if used_batches == 0:
@@ -1405,28 +1568,17 @@ def calibrate_trso_model(model: nn.Module, data_loader, device: torch.device, ar
             random_seed=getattr(args, "seed", 0),
         )
         score_rows.append((name, score))
-    resolved_budget = int(args.trso_parameter_budget)
-    if resolved_budget == 0 and getattr(args, "trso_variant", "v1") == "v3":
-        total_parameters = sum(parameter.numel() for parameter in model.parameters())
-        resolved_budget = int(round(total_parameters * float(args.trso_auto_budget_ratio)))
-        resolved_budget = max(int(args.trso_auto_budget_min), resolved_budget)
-        resolved_budget = min(int(args.trso_auto_budget_max), resolved_budget)
-        # Never allocate more than the complete candidate capacity.
-        total_capacity = sum(adapter.parameter_cost_for_rank(adapter.spatial_rank) for _, adapter in adapters)
-        resolved_budget = min(resolved_budget, total_capacity)
-        print(
-            f"[TRSO-v3] automatic budget={resolved_budget} "
-            f"({args.trso_auto_budget_ratio:g} of {total_parameters:,} parameters; capacity={total_capacity})"
-        )
+    resolved_budget, resolved_max_adapters = resolve_trso_budget_and_sparsity(model, adapters, args)
     selected = select_trso_layers(
         model,
-        max_adapters=args.trso_max_adapters,
+        max_adapters=resolved_max_adapters,
         keep_ratio=args.trso_keep_ratio,
         parameter_budget=resolved_budget,
         allocation=getattr(args, "trso_allocation", "exact"),
         score_mode=getattr(args, "trso_score_mode", "energy"),
         noise_beta=getattr(args, "trso_noise_beta", 0.0),
     )
+    apply_trso_residual_budget(adapters, selected, args)
 
     # Parameter-free trust-region selection. A single gate is chosen using only
     # training calibration batches, avoiding both the old vanishing 0.01 gate
@@ -2075,20 +2227,15 @@ def main(args):
     print(f"Number of training examples = {len(dataset_train)}")
     print(f"Number of training steps per epoch = {num_training_steps_per_epoch}")
 
-    # Optimizer param groups: adapter-like params use the adapter-specific decay.
-    adapter_like, other = [], []
-    for name, p in model_without_ddp.named_parameters():
-        if not p.requires_grad:
-            continue
-        is_adapter_like = any(tok in name for tok in ("pet_adapter", "trso", "basis_atoms", "coefficients", "gate", "bam", "ssf", "lora", "adaptformer", "piggyback", "mask_scores", "adapter", "side", "tuning_module", "prompt")) or id(p) in adapter_param_ids
-        (adapter_like if is_adapter_like else other).append(p)
-    print(f"[ParamGroups] adapter_like={sum(p.numel() for p in adapter_like):,} others={sum(p.numel() for p in other):,}")
-
-    parameter_groups = []
-    if adapter_like:
-        parameter_groups.append({"params": adapter_like, "lr": args.lr, "weight_decay": args.weight_decay_adapter})
-    if other:
-        parameter_groups.append({"params": other, "lr": args.lr, "weight_decay": args.weight_decay})
+    parameter_groups = build_optimizer_parameter_groups(
+        model_without_ddp, args, adapter_param_ids=adapter_param_ids
+    )
+    for group in parameter_groups:
+        print(
+            f"[ParamGroups] {group['group_name']}: "
+            f"params={sum(p.numel() for p in group['params']):,}, "
+            f"lr_scale={group['lr_scale']:g}, wd={group['weight_decay']:g}"
+        )
     if not parameter_groups:
         raise RuntimeError("No trainable parameters were supplied to the optimizer")
     if args.optimizer == "sgd":

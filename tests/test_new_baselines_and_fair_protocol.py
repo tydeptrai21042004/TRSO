@@ -292,7 +292,7 @@ def test_fair_dtd_manifest_includes_every_common_backbone_baseline(tmp_path):
         if spec.parameters["tuning_method"] not in {"full", "linear"}
     ]
     assert {row["fair_optimizer"] for row in peft} == {"adamw"}
-    assert {row["fair_peft_lr"] for row in peft} == {5e-3}
+    assert {row["fair_peft_lr"] for row in peft} == {1e-3}
     assert {row["fair_warmup_epochs"] for row in peft} == {5}
     assert {row["fair_weight_decay"] for row in peft} == {1e-4}
 

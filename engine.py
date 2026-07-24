@@ -113,7 +113,7 @@ def train_one_epoch(
         if data_iter_step % update_freq == 0:
             if lr_schedule_values is not None:
                 for group in optimizer.param_groups:
-                    group["lr"] = lr_schedule_values[iteration]
+                    group["lr"] = lr_schedule_values[iteration] * float(group.get("lr_scale", 1.0))
             if wd_schedule_values is not None:
                 for group in optimizer.param_groups:
                     if group.get("weight_decay", 0) > 0:
